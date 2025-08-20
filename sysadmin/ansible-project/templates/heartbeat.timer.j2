@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Node Heartbeat periodically
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+RandomizedDelaySec=2s
+
+[Install]
+WantedBy=timers.target

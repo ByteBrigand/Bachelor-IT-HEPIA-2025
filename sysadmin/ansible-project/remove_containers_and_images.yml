@@ -1,0 +1,83 @@
+---
+- name: Clean up all container resources
+  hosts: rpi_nodes
+  become: yes
+  vars_files:
+    - vars/main.yml
+  tasks:
+    - name: Ensure shared storage is readable
+      command: chmod -R 0755 /var/lib/shared-images
+
+    - name: Stop and remove user containers
+      block:
+        - name: Stop all user containers
+          become: true
+          become_user: "{{ item.name }}"
+          become_method: machinectl
+          become_exe: 'sudo machinectl'
+          command: podman stop -a
+          ignore_errors: yes
+          loop: "{{ users }}"
+
+        - name: Remove all user containers
+          become: true
+          become_user: "{{ item.name }}"
+          become_method: machinectl
+          become_exe: 'sudo machinectl'
+          command: podman rm -af
+          ignore_errors: yes
+          loop: "{{ users }}"
+
+        - name: Remove all user images
+          become: true
+          become_user: "{{ item.name }}"
+          become_method: machinectl
+          become_exe: 'sudo machinectl'
+          command: podman rmi -af
+          ignore_errors: yes
+          loop: "{{ users }}"
+
+    - name: Clean up root's container resources
+      block:
+        - name: Stop all root containers
+          command: podman stop -a
+          ignore_errors: yes
+
+        - name: Remove all root containers
+          command: podman rm -af
+          ignore_errors: yes
+
+        - name: Remove all root images
+          command: podman rmi -af
+          ignore_errors: yes
+
+        - name: Clean up build cache
+          command: podman system prune -af
+          ignore_errors: yes
+
+    - name: Clean up shared images storage
+      block:
+        - name: Stop any containers using shared storage
+          command: podman --root /var/lib/shared-images stop -a
+          ignore_errors: yes
+
+        - name: Remove containers from shared storage
+          command: podman --root /var/lib/shared-images rm -af
+          ignore_errors: yes
+
+        - name: Remove images from shared storage
+          command: podman --root /var/lib/shared-images rmi -af
+          ignore_errors: yes
+
+        - name: Clean up shared storage build cache
+          command: podman --root /var/lib/shared-images system prune -af
+          ignore_errors: yes
+
+    - name: Remove shared-images directory
+      file:
+        path: /var/lib/shared-images
+        state: absent
+
+    - name: Display cleanup completion message
+      debug:
+        msg: "Container cleanup completed on {{ inventory_hostname }}"

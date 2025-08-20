@@ -1,0 +1,139 @@
+---
+- name: Configure the GlusterFS Cluster
+  block:
+    - name: Unmount GlusterFS if already mounted
+      mount:
+        path: "{{ gluster_mount_path }}"
+        state: unmounted
+      ignore_errors: yes
+
+    - name: Ensure Gluster brick directory exists
+      file:
+        path: "{{ gluster_brick_path }}"
+        state: directory
+        mode: '0770'
+
+    - name: Ensure mount directory exists
+      file:
+        path: "/mnt"
+        state: directory
+        mode: '0751'
+
+    - name: Ensure Gluster mount directory exists
+      file:
+        path: "{{ gluster_mount_path }}"
+        state: directory
+        mode: '0751'
+
+    - name: Ensure GlusterFS packages are present
+      package:
+        name: [glusterfs-server, glusterfs-client]
+        state: present
+
+    - name: Enable and start GlusterFS service
+      service:
+        name: glusterd
+        state: started
+        enabled: yes
+
+
+
+
+    # Cluster configuration (primary gateway only)
+    - name: Configure GlusterFS cluster
+      block:
+        - name: Gather WireGuard IPs of all nodes
+          set_fact:
+            gluster_peers: "{{ groups['rpi_nodes'] | map('extract', hostvars, 'wireguard_address') | map('regex_replace', '/24', '') | list }}"
+          run_once: true
+
+        - name: Debug groups['rpi_nodes']
+          debug:
+            var: groups['rpi_nodes']
+          run_once: true
+
+        - name: Debug gluster_peers
+          debug:
+            var: gluster_peers
+          run_once: true
+
+        - name: Probe peers
+          gluster.gluster.gluster_peer:
+            state: present
+            nodes: "{{ gluster_peers }}"
+
+
+        - name: Configure Gluster volume.
+          gluster.gluster.gluster_volume:
+            state: present
+            name: "{{ gluster_volume_name }}"
+            bricks: "{{ gluster_brick_path }}"
+            cluster: "{{ gluster_peers }}"
+            replicas: "{{ gluster_replica_count }}"
+            options: "{{ gluster_volume_options }}"
+            rebalance: yes
+            force: yes # otherwise can't mount on root partition
+          run_once: true
+
+        - name: Start gluster volume
+          gluster.gluster.gluster_volume:
+            state: started
+            name: "{{ gluster_volume_name }}"
+
+
+      run_once: true
+      delegate_to: "{{ primary_gateway }}"
+
+
+
+    # Mount configuration (all nodes)
+    - name: Get own WireGuard IP without subnet mask
+      set_fact:
+        own_wireguard_ip: "{{ wireguard_address | regex_replace('/24', '') }}"
+
+    - name: Add GlusterFS mount entry to fstab
+      lineinfile:
+        path: /etc/fstab
+        line: "{{ own_wireguard_ip }}:/{{ gluster_volume_name }} {{ gluster_mount_path }} glusterfs defaults,_netdev,acl 0 0"
+        regexp: "^.*{{ gluster_mount_path }} glusterfs.*$"
+        state: present
+        backup: yes
+
+    - name: Ensure Gluster volume is mounted.
+      mount:
+        name: "{{ gluster_mount_path }}"
+        src: "{{ own_wireguard_ip }}:/{{ gluster_volume_name }}"
+        fstype: glusterfs
+        opts: "defaults,_netdev,acl"
+        state: mounted
+
+
+    # User directory setup (primary gateway only)
+    - name: Setup user directories
+      block:
+        - name: Create users directory
+          file:
+            path: "{{ gluster_mount_path }}/users"
+            state: directory
+            mode: '0751'
+
+        - name: Create user-specific directories
+          file:
+            path: "{{ gluster_mount_path }}/users/{{ item.name }}"
+            state: directory
+            mode: '2770'
+            owner: "{{ item.name }}"
+            group: "{{ item.name }}"
+          loop: "{{ users }}"
+
+        - name: Ensure Gluster mount directory has right permissions
+          file:
+            path: "{{ gluster_mount_path }}"
+            state: directory
+            mode: '0751'
+            force: yes
+      run_once: true
+      delegate_to: "{{ primary_gateway }}"
+
+
+  tags: all_tasks, glusterfs

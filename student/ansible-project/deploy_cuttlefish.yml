@@ -1,0 +1,483 @@
+---
+- name: Deploy and start Android Cuttlefish
+  hosts: all
+  become: true
+  vars:
+    aosp_zip: aosp_cf_arm64_only.zip
+    cvd_host: cvd-host_package.tar.gz
+    dest_dir_aosp: /root/aosp
+    default_cpu_count: 1
+
+  tasks:
+    - name: Get number of CPUs
+      shell: getconf _NPROCESSORS_ONLN
+      register: cpu_count
+      changed_when: false
+
+    - name: Get hostname from /info/hostname
+      shell: cat /info/hostname
+      register: device_hostname
+      changed_when: false
+
+    # - name: Install required packages
+    #   package:
+    #     name: 
+    #       - unzip
+    #       - zstd
+    #       - bzip2
+    #       - gzip
+    #     state: present
+    #     update_cache: true
+
+    - name: Calculate local file hashes
+      delegate_to: localhost
+      become: false
+      run_once: true
+      command: sha256sum {{ item }}
+      register: local_hashes
+      with_items:
+        - "{{ aosp_zip }}"
+        - "{{ cvd_host }}"
+      changed_when: false
+
+    - name: Create hash facts
+      set_fact:
+        aosp_hash: "{{ (local_hashes.results | selectattr('item', 'equalto', aosp_zip) | first).stdout.split()[0] }}"
+        cvd_hash: "{{ (local_hashes.results | selectattr('item', 'equalto', cvd_host) | first).stdout.split()[0] }}"
+
+    - name: Create AOSP directory
+      file:
+        path: "{{ dest_dir_aosp }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check existing hash files
+      stat:
+        path: "{{ dest_dir_aosp }}/.{{ item.file }}.sha256"
+      register: hash_stats
+      with_items:
+        - { file: 'aosp', hash: "{{ aosp_hash }}" }
+        - { file: 'cvd', hash: "{{ cvd_hash }}" }
+
+    - name: Read existing hashes
+      slurp:
+        path: "{{ dest_dir_aosp }}/.{{ item.0.file }}.sha256"
+      register: existing_hashes
+      when: item.1.stat.exists
+      with_together:
+        - [{ file: 'aosp', hash: "{{ aosp_hash }}" }, { file: 'cvd', hash: "{{ cvd_hash }}" }]
+        - "{{ hash_stats.results }}"
+
+    - name: Set deployment needed fact
+      set_fact:
+        deployment_needed: >-
+          {{ not (hash_stats.results[0].stat.exists and 
+             hash_stats.results[1].stat.exists and 
+             (existing_hashes.results[0].content | default('') | b64decode | trim == aosp_hash) and 
+             (existing_hashes.results[1].content | default('') | b64decode | trim == cvd_hash)) }}
+    - name: Deploy files and start Cuttlefish
+      block:
+        - name: Copy AOSP zip file
+          copy:
+            src: "{{ aosp_zip }}"
+            dest: "{{ dest_dir_aosp }}/{{ aosp_zip }}"
+            mode: '0644'
+
+        - name: Copy CVD host package
+          copy:
+            src: "{{ cvd_host }}"
+            dest: "{{ dest_dir_aosp }}/{{ cvd_host }}"
+            mode: '0644'
+
+        - name: Unpack AOSP zip
+          unarchive:
+            src: "{{ dest_dir_aosp }}/{{ aosp_zip }}"
+            dest: "{{ dest_dir_aosp }}"
+            remote_src: yes
+
+        - name: Unpack CVD host package
+          unarchive:
+            src: "{{ dest_dir_aosp }}/{{ cvd_host }}"
+            dest: "{{ dest_dir_aosp }}"
+            remote_src: yes
+
+        - name: Remove zip files
+          file:
+            path: "{{ item }}"
+            state: absent
+          with_items:
+            - "{{ dest_dir_aosp }}/{{ aosp_zip }}"
+            - "{{ dest_dir_aosp }}/{{ cvd_host }}"
+
+        - name: Store AOSP hash
+          copy:
+            content: "{{ aosp_hash }}"
+            dest: "{{ dest_dir_aosp }}/.aosp.sha256"
+            mode: '0644'
+
+        - name: Store CVD hash
+          copy:
+            content: "{{ cvd_hash }}"
+            dest: "{{ dest_dir_aosp }}/.cvd.sha256"
+            mode: '0644'
+      when: deployment_needed
+
+
+
+
+
+
+
+    - name: Stop Android Cuttlefish
+      shell: "{{ dest_dir_aosp }}/bin/stop_cvd 2>&1 &"
+      environment:
+        HOME: "{{ dest_dir_aosp }}"
+
+
+
+
+    - name: Check if Cuttlefish is running
+      shell: "ps aux | grep '[l]aunch_cvd$' || echo 'not_running'"
+      register: cvd_check
+      changed_when: false
+
+    - name: Debug check output
+      debug:
+        msg: 
+          - "Raw stdout: '{{ cvd_check.stdout }}'"
+          - "Stdout type: {{ cvd_check.stdout | type_debug }}"
+          - "Compare result: {{ cvd_check.stdout == 'not_running' }}"
+
+
+
+
+
+    - name: Launch Android Cuttlefish
+      shell: "{{ dest_dir_aosp }}/bin/launch_cvd --daemon --num-instances=1 --cpus={{ cpu_count.stdout }} --start_webrtc=true --tcp_port_range 15550:15599 --udp_port_range 15550:15599 > {{ dest_dir_aosp }}/launch.log 2>&1 &"
+      environment:
+        HOME: "{{ dest_dir_aosp }}"
+      when: cvd_check.stdout == 'not_running'
+      async: 45
+      poll: 0
+
+
+
+    - name: Wait for Cuttlefish to start
+      shell: "pgrep -f launch_cvd"
+      register: verify_cvd
+      until: verify_cvd.rc == 0
+      retries: 3
+      delay: 10
+      changed_when: false
+      when: cvd_check.stdout == 'not_running'
+
+    - name: Show launch log if startup failed
+      shell: "cat {{ dest_dir_aosp }}/launch.log"
+      register: launch_log
+      when: verify_cvd.rc is defined and verify_cvd.rc != 0
+      failed_when: verify_cvd.rc is defined and verify_cvd.rc != 0
+
+    - name: Wait for device boot completion
+      shell: "grep 'Virtual device booted successfully' {{ dest_dir_aosp }}/cuttlefish/instances/cvd-1/logs/launcher.log"
+      register: boot_check
+      until: boot_check.rc == 0
+      retries: 240
+      delay: 10
+      changed_when: false
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+
+
+
+
+    - name: Get root access via adb
+      shell: "adb devices && sleep 2 && adb root"
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+
+
+# Android routing
+    - name: Set default route in Android
+      shell: "adb shell 'ip route add default via 192.168.97.1'"
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+      register: route_result
+      failed_when: route_result.rc != 0
+      changed_when: route_result.rc == 0
+
+
+
+    - name: Debug boot_check output
+      debug:
+        msg: 
+          - "Boot check RC: {{ boot_check.rc | default('undefined') }}"
+          - "Boot check stdout: {{ boot_check.stdout | default('undefined') }}"
+          - "Boot check stderr: {{ boot_check.stderr | default('undefined') }}"
+      when: boot_check is defined
+
+    - name: Debug route_result output
+      debug:
+        msg: 
+          - "Route result RC: {{ route_result.rc | default('undefined') }}"
+          - "Route result stdout: {{ route_result.stdout | default('undefined') }}"
+          - "Route result stderr: {{ route_result.stderr | default('undefined') }}"
+      when: route_result is defined
+
+
+
+    - name: Set SELinux to permissive mode
+      shell: "adb shell setenforce 0"
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+
+    - name: Disable ASLR
+      shell: "adb shell 'echo 0 > /proc/sys/kernel/randomize_va_space'"
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+
+
+
+    - name: Create necessary directories on Android
+      shell: "adb shell mkdir -p /data/local/tmp/afl-android/{bin,include/afl,lib/afl}"
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+
+    - name: Push afl-android to device
+      shell: "adb push /opt/afl-android /data/local/tmp/"
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+      ignore_errors: yes
+
+    - name: Push gdb-android to device
+      shell: "adb push /usr/local/share/gdb-android.tar.gz /data/local/tmp/"
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+      ignore_errors: yes
+
+    - name: Decompress gdb on device
+      shell: "adb shell 'tar -xzf /data/local/tmp/gdb-android.tar.gz -C /data/local/tmp/'"
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+      ignore_errors: yes
+
+
+
+# Cleanup shared directory
+    # - name: Kill adb-sync.sh process
+    #   shell: pkill -f adb-sync.sh || true
+    #   ignore_errors: yes
+  
+    # - name: Remove all files on host
+    #   shell: rm -rf /var/log/adb-sync.log /tmp/adb_sync/* /shared/shared_files/* /shared/staging/*
+    #   ignore_errors: yes
+
+    # - name: Remove all files on device
+    #   shell: adb shell rm -rf /sdcard/staging/* /sdcard/shared_files/*
+    #   ignore_errors: yes
+
+    # - name: Restart adb-sync.sh
+    #   shell: nohup /usr/local/bin/adb-sync.sh > /dev/null 2>&1 &
+    #   ignore_errors: yes
+
+
+
+# Test fuzzing
+    - name: Copy fuzzme.c from local to remote
+      copy:
+        src: fuzzme.c  # Assuming it's in the local directory where the playbook is run from
+        dest: "/root/fuzzme.c"
+        mode: '0644'
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+
+
+
+    - name: Check if this device should be master or slave
+      shell: |
+        hostname=$(cat /info/hostname)
+        if [ -f /shared/master ]; then
+          # Check if the hostname (before comma) is present in any line of /shared/master
+          while IFS=, read -r host _; do
+            if [ "$host" = "$hostname" ]; then
+              echo "master"
+              exit 0
+            fi
+          done < /shared/master
+        fi
+        echo "slave"
+      register: is_master_result
+      changed_when: false
+
+    - name: Set is_master fact
+      set_fact:
+        is_master: "{{ is_master_result.stdout == 'master' }}"
+
+
+# Local fuzzing test
+
+    # - name: Compile fuzzme.c with afl-cc
+    #   shell: "AFL_HARDEN=1 /usr/local/bin/afl-cc /root/fuzzme.c -o /root/fuzzme"
+    #   when: verify_cvd.rc is defined and verify_cvd.rc == 0
+    #   register: compile_result
+    #   ignore_errors: yes
+
+    # - name: Create input and output directories
+    #   shell: "mkdir -p /shared/shared_files/input /shared/shared_files/output"
+    #   when: compile_result.rc is defined and compile_result.rc == 0
+    #   ignore_errors: yes
+
+    # - name: Create test input file
+    #   shell: "echo test1 > /shared/shared_files/input/test1"
+    #   when: compile_result.rc is defined and compile_result.rc == 0
+    #   ignore_errors: yes
+
+    # - name: Kill existing AFL fuzzer processes before starting new ones
+    #   shell: "pkill -f afl-fuzz || true"
+    #   ignore_errors: yes
+    #   when: compile_result.rc is defined and compile_result.rc == 0
+
+
+    # - name: Run AFL fuzzer locally
+    #   shell: |
+    #     /usr/local/bin/afl-fuzz \
+    #     {% if is_master and item == 0 %}-M{% else %}-S{% endif %} {{ ansible_hostname }}_{{ item }} \
+    #     -i /shared/shared_files/input \
+    #     -o /shared/shared_files/output \
+    #     /root/fuzzme > /tmp/afl-debug-{{ item }}.log 2>&1 &
+    #   async: 120
+    #   poll: 0
+    #   when: compile_result.rc is defined and compile_result.rc == 0
+    #   register: fuzz_result
+    #   ignore_errors: yes
+    #   loop: "{{ range(0, (cpu_count.stdout|int if cpu_count.stdout is defined else default_cpu_count)) | list }}"
+    #   loop_control:
+    #     label: "{{ item }}"
+
+    # - name: Wait for fuzzing to complete (120 seconds)
+    #   pause:
+    #     seconds: 120
+    #   when: compile_result.rc is defined and compile_result.rc == 0
+
+    # - name: Kill AFL fuzzer process
+    #   shell: "pkill -f afl-fuzz"
+    #   ignore_errors: yes
+    #   when: compile_result.rc is defined and compile_result.rc == 0
+
+
+    # - name: Check for crashes
+    #   shell: "ls /shared/shared_files/output/default/crashes/id* 2>/dev/null | wc -l"
+    #   register: crash_count
+    #   when: compile_result.rc is defined and compile_result.rc == 0
+    #   ignore_errors: yes
+
+    # - name: Display crash count
+    #   debug:
+    #     msg: "Found {{ crash_count.stdout | default('0') }} crashes"
+    #   when: compile_result.rc is defined and compile_result.rc == 0
+
+# Cleanup shared directory
+    # - name: Kill adb-sync.sh process
+    #   shell: pkill -f adb-sync.sh || true
+    #   ignore_errors: yes
+  
+    # # If this fails, comment it out
+    # - name: Remove all files on host
+    #   shell: rm -rf /var/log/adb-sync.log /tmp/adb_sync/* /shared/shared_files/* /shared/staging/*
+    #   ignore_errors: yes
+
+    # - name: Remove all files on device
+    #   shell: adb shell rm -rf /sdcard/staging/* /sdcard/shared_files/*
+    #   ignore_errors: yes
+
+    # - name: Restart adb-sync.sh
+    #   shell: nohup /usr/local/bin/adb-sync.sh > /dev/null 2>&1 &
+    #   ignore_errors: yes
+
+
+
+# Android fuzzing test
+    - name: Copy fuzzme.c from local to remote
+      copy:
+        src: fuzzme.c  # Assuming it's in the local directory where the playbook is run from
+        dest: "/root/fuzzme.c"
+        mode: '0644'
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+
+    - name: Compile fuzzme.c for Android with afl-clang-android
+      shell: "AFL_HARDEN=1 /usr/local/bin/afl-clang-android /root/fuzzme.c -o /root/fuzzme"
+      when: verify_cvd.rc is defined and verify_cvd.rc == 0
+      register: android_compile_result
+      ignore_errors: yes
+
+    - name: Push fuzzme to Android device
+      shell: "adb push /root/fuzzme /data/local/tmp/fuzzme"
+      when: android_compile_result.rc is defined and android_compile_result.rc == 0
+      ignore_errors: yes
+
+    - name: Create input and output directories on Android
+      shell: "adb shell mkdir -p /sdcard/shared_files/input /sdcard/shared_files/output"
+      when: android_compile_result.rc is defined and android_compile_result.rc == 0
+      ignore_errors: yes
+
+    - name: Create test input file on Android
+      shell: "adb shell 'echo test1 > /sdcard/shared_files/input/test1'"
+      when: android_compile_result.rc is defined and android_compile_result.rc == 0
+      ignore_errors: yes
+
+
+    - name: Kill existing AFL fuzzer processes on Android before starting new ones
+      shell: "adb shell 'pkill -f afl-fuzz' || true"
+      ignore_errors: yes
+      when: android_compile_result.rc is defined and android_compile_result.rc == 0
+
+    - name: Run AFL fuzzer on Android
+      shell: "adb shell '/data/local/tmp/afl-android/bin/afl-fuzz \
+        {% if is_master and item == 0 %}-M{% else %}-S{% endif %} {{ ansible_hostname }}_{{ item }} \
+        -i /sdcard/shared_files/input \
+        -o /sdcard/shared_files/output \
+        /data/local/tmp/fuzzme > /sdcard/afl-debug-{{ item }}.log 2>&1 &'"
+      when: android_compile_result.rc is defined and android_compile_result.rc == 0
+      ignore_errors: yes
+      loop: "{{ range(0, (cpu_count.stdout|int if cpu_count.stdout is defined else default_cpu_count)) | list }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Wait for fuzzing to complete (120 seconds)
+      pause:
+        seconds: 120
+      when: android_compile_result.rc is defined and android_compile_result.rc == 0
+
+    - name: Kill AFL fuzzer process on Android
+      shell: "adb shell 'pkill -f afl-fuzz'"
+      ignore_errors: yes
+      when: android_compile_result.rc is defined and android_compile_result.rc == 0
+
+    - name: Check for crashes on Android
+      shell: "adb shell 'find /sdcard/shared_files/output/ -type d -name crashes | while read dir; do ls \"$dir\"/id* 2>/dev/null; done | wc -l'"
+      register: android_crash_count
+      when: android_compile_result.rc is defined and android_compile_result.rc == 0
+      ignore_errors: yes
+
+    - name: Display Android crash count
+      debug:
+        msg: "Found {{ android_crash_count.stdout | default('0') }} crashes on Android"
+      when: android_compile_result.rc is defined and android_compile_result.rc == 0
+
+# Cleanup shared directory
+    - name: Kill adb-sync.sh process
+      shell: pkill -f adb-sync.sh || true
+      ignore_errors: yes
+  
+    - name: Remove all files on host
+      shell: rm -rf /var/log/adb-sync.log /tmp/adb_sync/* /shared/shared_files/* /shared/staging/*
+      ignore_errors: yes
+
+    - name: Remove all files on device
+      shell: adb shell rm -rf /sdcard/staging/* /sdcard/shared_files/*
+      ignore_errors: yes
+
+    - name: Restart adb-sync.sh
+      shell: nohup /usr/local/bin/adb-sync.sh > /dev/null 2>&1 &
+      ignore_errors: yes
+
+# ps -ef | grep afl
+# /data/local/tmp/afl-android/bin/afl-whatsup /sdcard/shared_files/output
+
+# TODO: set up busybox and alpine
+# they are nice to have, especially wget in android
+# download https://github.com/Magisk-Modules-Repo/busybox-ndk/raw/master/busybox-arm64
+# push it to the android device, follow guide from the blog https://blog.cypherpunksamurai.eu.org/posts/Running-Alpine-Chroot-On-Android-(without-Termux)
+# add dns to /etc/resolv.conf on alpine
+# chroot into alpine and update apk
+# can also execute like so from alpine root dir: LD_LIBRARY_PATH=./lib:./usr/lib ./lib/ld-musl-aarch64.so.1 ./sbin/apk --root . --no-cache --allow-untrusted update
+

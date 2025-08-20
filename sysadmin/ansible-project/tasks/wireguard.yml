@@ -1,0 +1,58 @@
+---
+- name: Configure and Validate WireGuard Mesh
+  block:
+    - name: Install WireGuard tools
+      package:
+        name: wireguard-tools
+        state: present
+
+    - name: Create WireGuard configuration directory
+      file:
+        path: /etc/wireguard
+        state: directory
+        mode: '0700'
+
+    - name: Copy pre-generated WireGuard configuration
+      copy:
+        src: "secrets/wg_configs/{{ inventory_hostname }}_{{ wg_if }}.conf"
+        dest: "/etc/wireguard/{{ wg_if }}.conf"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Ensure WireGuard service is enabled and started
+      service:
+        name: "wg-quick@{{ wg_if }}"
+        state: restarted
+        enabled: yes
+
+    # --- Validation Steps ---
+
+    - name: Gather facts from all hosts for connectivity test
+      setup:
+      delegate_facts: true
+
+    - name: Test WireGuard mesh connectivity
+      command: "ping -c 1 -W 2 {{ hostvars[item]['wireguard_address'] | regex_replace('/.*$','') }}"
+      loop: "{{ groups['rpi_nodes'] }}"
+      when: item != inventory_hostname
+      register: ping_results
+      changed_when: false
+      failed_when: false # We check for failure in the next task
+
+    - name: Show ping test results over WireGuard
+      debug:
+        msg: >-
+          {{ inventory_hostname }} connectivity:
+          {% for result in ping_results.results %}
+            {% if result.skipped is not defined %}
+              {{ result.item }}({{ 'OK' if result.rc == 0 else 'FAIL' }})
+            {% endif %}
+          {% endfor %}
+
+    - name: Fail playbook if any ping test failed
+      fail:
+        msg: "WireGuard mesh connectivity test failed. Check logs and configurations."
+      when: ping_results.results | selectattr('skipped', 'undefined') | selectattr('rc', '!=', 0) | list | length > 0
+
+  tags: all_tasks, wireguard

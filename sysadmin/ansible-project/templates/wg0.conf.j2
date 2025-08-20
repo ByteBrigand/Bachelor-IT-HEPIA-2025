@@ -1,0 +1,17 @@
+[Interface]
+PrivateKey = {{ wireguard_private_key }}
+Address = {{ current_host_vars.wireguard_address }}
+ListenPort = {{ current_host_vars.wireguard_port }}
+PostUp = {% for host in groups['rpi_nodes'] %}{% if host != current_host %}ip route add {{ hostvars[host]['container_subnet'] }} via {{ hostvars[host]['wireguard_address'] | regex_replace('/.*$','') }}; {% endif %}{% endfor %}
+
+PostDown = {% for host in groups['rpi_nodes'] %}{% if host != current_host %}ip route del {{ hostvars[host]['container_subnet'] }} via {{ hostvars[host]['wireguard_address'] | regex_replace('/.*$','') }}; {% endif %}{% endfor %}
+
+{% for host in groups['rpi_nodes'] %}
+{% if host != current_host %}
+[Peer]
+PublicKey = {{ rpi_wg_keys[host].public_key }}
+AllowedIPs = {{ hostvars[host]['wireguard_address'] | regex_replace('/.*$','') }}/32
+Endpoint = {{ hostvars[host]['ansible_host'] }}:{{ hostvars[host]['wireguard_port'] }}
+PersistentKeepalive = 25
+{% endif %}
+{% endfor %}

@@ -1,0 +1,241 @@
+---
+- name: Build Images and Launch Containers
+  block:
+
+    - name: Ensure Podman is installed
+      apt:
+        name: podman
+        state: present
+
+
+
+
+    - name: Create shared image storage directory
+      file:
+        path: /var/lib/shared-images
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+
+
+
+
+
+    - name: Create containers config directory
+      file:
+        path: "/home/{{ item.name }}/.config/containers"
+        state: directory
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0755'
+      loop: "{{ users }}"
+
+
+
+    - name: Configure storage.conf for shared images
+      copy:
+        dest: "/home/{{ item.name }}/.config/containers/storage.conf"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0644'
+        content: |
+          [storage]
+          driver = "overlay"
+
+          [storage.options]
+          additionalimagestores = ["/var/lib/shared-images"]
+
+          [storage.options.overlay]
+          mount_program = "/usr/bin/fuse-overlayfs"
+      loop: "{{ users }}"
+
+
+
+    - name: Configure unqualified-search registries
+      blockinfile:
+        path: /etc/containers/registries.conf
+        create: yes
+        block: |
+          unqualified-search-registries = ["docker.io"]
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - unqualified registries"
+
+
+    - name: Create build directory on remote hosts
+      file:
+        path: "/root/cuttlefish-build"
+        state: directory
+        mode: '0755'
+
+    - name: Copy build context to remote hosts
+      copy:
+        src: "{{ playbook_dir }}/cuttlefish-container/"
+        dest: "/root/cuttlefish-build/"
+
+
+    - name: Ensure tmp has correct permissions
+      command: chmod -R 1777 /tmp
+
+
+    - name: Ensure shared storage is readable
+      command: chmod -R 0755 /var/lib/shared-images # really nasty having to constantly reset permissions on this shared directory but it's a small cost to pay for not having to run a registry
+
+
+    - name: Remove user containers
+      become: true
+      become_user: "{{ item.name }}"
+      become_method: machinectl
+      become_exe: 'sudo machinectl'
+      command: podman rm -f "cuttlefish-{{ item.name }}"
+      ignore_errors: yes
+      loop: "{{ users }}"
+
+
+
+
+
+    - name: Build Cuttlefish container image in shared storage
+      command: podman --root /var/lib/shared-images build -t cuttlefish /root/cuttlefish-build
+
+    - name: Ensure shared storage is readable
+      command: chmod -R 0755 /var/lib/shared-images
+
+
+
+
+
+    # without linger the glusterfs share won't be available
+    - name: Enable user lingering for container users
+      command: "loginctl enable-linger {{ item.name }}"
+      loop: "{{ users }}"
+
+
+
+
+
+    - name: Get user info
+      user:
+        name: "{{ item.name }}"
+        state: present
+      check_mode: yes
+      register: user_info
+      loop: "{{ users }}"
+
+    - name: Set UIDs fact
+      set_fact:
+        user_uids: "{{ dict(users|map(attribute='name')|zip(user_info.results|map(attribute='uid'))) }}"
+
+
+
+
+
+
+    - name: Ensure /dev/kvm is readable and writable by everyone
+      command: chmod o+rw /dev/kvm # TODO : remove this by finding which UID is used by cuttlefish to access /dev/kvm and then add an ACL, or add that UID to the kvm group
+
+
+
+
+    - name: Start Cuttlefish containers
+      become: true
+      become_user: "{{ item.name }}"
+      become_method: machinectl
+      become_exe: 'sudo machinectl'
+      containers.podman.podman_container:
+        name: "cuttlefish-{{ item.name }}"
+        image: localhost/cuttlefish:latest # TODO : switch to versioning in production
+        state: started
+        init: true
+        recreate: true # breaks idempotency TODO: only recreate if tag podman_recreate present
+        privileged: true # needed by wireguard, keep getting "sysctl: permission denied on key "net.ipv4.conf.all.src_valid_mark" when adding 0.0.0.0/0 to peer allowed IPs, even with all the CAP adds
+        device:
+          - "/dev/kvm"         # needed by cuttlefish
+          - "/dev/net/tun"     # needed by cuttlefish
+          - "/dev/vhost-vsock" # needed by cuttlefish
+          - "/dev/vhost-net"   # needed by cuttlefish
+        cap_add:
+          - NET_ADMIN  # needed by cuttlefish and wireguard
+          - NET_RAW    # needed by cuttlefish and wireguard
+          - SYS_MODULE # needed by wireguard
+          - SYS_ADMIN  # needed by wireguard
+          - SETGID     # needed by wireguard
+          - SETUID     # needed by wireguard
+        volume:
+          - "/home/{{ item.name }}:/root:rw"
+          - "/info/{{ item.name }}:/info:ro"
+          - "/mnt/shared/users/{{ item.name }}:/shared:Z" # this is tricky, requires active user session, using machinectl and linger
+          - "/sys/fs/cgroup:/sys/fs/cgroup:ro" # TODO: test if really needed
+        tmpfs:
+          /tmp: "rw"
+        network: "slirp4netns"
+        sysctl:
+          net.ipv4.conf.all.src_valid_mark: 1 # needed by wireguard
+          net.ipv4.conf.all.forwarding: 1     # not really needed, nice to have
+          net.ipv4.ip_forward: 1              # not really needed, nice to have
+        annotation:
+          run.oci.keep_original_groups: "1" # TODO: test if really needed
+        publish:
+          - "{{ wg_ports[item.name] }}:51820/udp"
+        restart_policy: "no" # TODO : need to manage restart ourselves using machinectl
+      loop: "{{ users }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+
+
+
+
+
+
+
+
+    - name: Create systemd override directory for podman
+      file:
+        path: "/etc/systemd/system/podman.service.d"
+        state: directory
+        mode: '0755'
+
+    - name: Configure service startup delay
+      copy:
+        dest: "/etc/systemd/system/podman.service.d/override.conf"
+        content: |
+          [Service]
+          # Need some time to mount glusterfs share and our podman containers depend on them
+          ExecStartPre=/bin/sleep 30
+
+
+
+
+
+    - name: Wait for containers to be ready
+      wait_for:
+        timeout: 30
+
+
+    - name: Check container status
+      become: true
+      become_user: "{{ item.name }}"
+      become_method: machinectl
+      become_exe: 'sudo machinectl'
+      containers.podman.podman_container_info:
+        name: "cuttlefish-{{ item.name }}"
+      register: container_status
+      loop: "{{ users }}"
+
+    - name: Display container status
+      debug:
+        msg: |
+          Container: cuttlefish-{{ item.item.name }}
+          Status: {{ item.containers[0].State.Status if item.containers else 'Not found' }}
+          Running: {{ item.containers[0].State.Running if item.containers else 'No' }}
+          Ports: {{ item.containers[0].HostConfig.PortBindings if item.containers else 'None' }}
+      loop: "{{ container_status.results }}"
+      loop_control:
+        label: "cuttlefish-{{ item.item.name }}"
+
+
+
+
+  tags: all_tasks, podman
+

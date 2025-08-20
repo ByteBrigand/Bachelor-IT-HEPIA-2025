@@ -1,0 +1,22 @@
+all:
+  hosts:
+    wg-10.10.5.1:
+      ansible_host: 10.10.5.1
+      ansible_user: user1
+      ansible_become: true
+      ansible_become_method: sudo
+    wg-10.10.5.2:
+      ansible_host: 10.10.5.2
+      ansible_user: user1
+      ansible_become: true
+      ansible_become_method: sudo
+    wg-10.10.5.3:
+      ansible_host: 10.10.5.3
+      ansible_user: user1
+      ansible_become: true
+      ansible_become_method: sudo
+    wg-10.10.5.4:
+      ansible_host: 10.10.5.4
+      ansible_user: user1
+      ansible_become: true
+      ansible_become_method: sudo

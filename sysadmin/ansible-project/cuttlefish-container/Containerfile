@@ -1,0 +1,278 @@
+
+# TODO : pin versions of debian and python packages
+# TODO : add possibility of building on a fast remote machine and then copy the image to our cluster
+
+# This takes four hours and 80 GB to build
+
+FROM docker.io/library/debian:12
+
+COPY debian-archive-12.asc debian-security-12.asc /etc/apt/trusted.gpg.d/
+
+RUN chmod 644 /etc/apt/trusted.gpg.d/*.asc && \
+    mkdir -m 1777 -p /tmp && chown root:root /tmp && chmod 1777 /tmp && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    android-libunwind-dev \
+    adb \
+    apt-utils \
+    autoconf \
+    automake \
+    binfmt-support \
+    binutils-aarch64-linux-gnu \
+    binutils-gold \
+    bison \
+    build-essential \
+    bzip2 \
+    ca-certificates \
+    cargo \
+    clang-14 \
+    cpio \
+    curl \
+    flex \
+    gcc-12 \
+    gcc-12-plugin-dev \
+    gcc-aarch64-linux-gnu \
+    gdb \
+    ghc \
+    git \
+    gnupg2 \
+    g++-12 \
+    g++-aarch64-linux-gnu \
+    grep \
+    gzip \
+    htop \
+    iputils-ping \
+    lcov \
+    libcapstone-dev \
+    libedit-dev \
+    libexpat-dev \
+    libglib2.0-dev \
+    libgtk-3-dev \
+    libpixman-1-dev \
+    libstdc++-12-dev \
+    libtinfo-dev \
+    libtool \
+    libtool-bin \
+    libunwind-dev \
+    libxml2-dev \
+    libz-dev \
+    libzstd-dev \
+    lld-14 \
+    llvm-14 \
+    llvm-14-dev \
+    lsof \
+    make \
+    nano \
+    ninja-build \
+    openjdk-17-jdk \
+    openssh-server \
+    patch \
+    pkg-config \
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-setuptools \
+    python3-venv \
+    qemu-user \
+    qemu-user-static \
+    screen \
+    sed \
+    sudo \
+    systemd \
+    tar \
+    tmux \
+    tree \
+    unzip \
+    wget \
+    wireguard-tools \
+    zip \
+    apt-utils \
+    zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build and install zlib system-wide
+WORKDIR /tmp
+RUN wget https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz \
+    && tar xf zlib-1.3.1.tar.gz \
+    && cd zlib-1.3.1 \
+    && CFLAGS="-fPIC" ./configure --prefix=/usr \
+    && make -j$(nproc) \
+    && make install \
+    && cd .. \
+    && rm -rf zlib-1.3.1*
+
+
+# Install custom CMake
+WORKDIR /tmp
+RUN wget https://github.com/Kitware/CMake/releases/download/v4.1.0/cmake-4.1.0-linux-aarch64.tar.gz \
+    && tar xf cmake-4.1.0-linux-aarch64.tar.gz \
+    && mv cmake-4.1.0-linux-aarch64 /usr/local/cmake-4.1.0 \
+    && ln -s /usr/local/cmake-4.1.0/bin/cmake /usr/local/bin/cmake \
+    && rm cmake-4.1.0-linux-aarch64.tar.gz
+
+
+# Build custom LLVM for NDK
+WORKDIR /tmp
+RUN git clone --depth 1 --single-branch -b llvm-r522817 https://android.googlesource.com/toolchain/llvm-project \
+    && mkdir llvm-build \
+    && cd llvm-build \
+    && cmake -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLVM_ENABLE_PROJECTS="clang;lld" \
+        -DLLVM_TARGETS_TO_BUILD="AArch64" \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DLLVM_ENABLE_ZLIB=ON \
+        -DLLVM_INCLUDE_TESTS=OFF \
+        -DLLVM_INCLUDE_EXAMPLES=OFF \
+        -DLLVM_ENABLE_TERMINFO=ON \
+        -DLLVM_ENABLE_PIC=ON \
+        -DLLVM_ENABLE_ASSERTIONS=OFF \
+        -DLLVM_ENABLE_LIBXML2=ON \
+        -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+        -DLLVM_CREATE_SYMLINKS=ON \
+        -DLLVM_ENABLE_RTTI=ON \
+        -DLLVM_ENABLE_EH=ON \
+        ../llvm-project/llvm \
+    && ninja -j$(nproc) \
+    && apt-get remove -y llvm-14 llvm-14-dev clang-14 lld-14 \
+    && apt-get autoremove -y \
+    && ninja install \
+    && cd .. \
+    && rm -rf llvm-project llvm-build
+
+
+# Download and install Java 21 for Ghidra
+WORKDIR /tmp
+RUN wget https://download.oracle.com/java/21/latest/jdk-21_linux-aarch64_bin.tar.gz \
+    && mkdir -p /usr/lib/jvm \
+    && tar -xzf jdk-21_linux-aarch64_bin.tar.gz -C /usr/lib/jvm \
+    && rm jdk-21_linux-aarch64_bin.tar.gz \
+    && update-alternatives --install /usr/bin/java java /usr/lib/jvm/jdk-21.*/bin/java 2100 \
+    && update-alternatives --install /usr/bin/java java /usr/lib/jvm/java-17-openjdk-arm64/bin/java 1700
+
+
+# Download and install Ghidra
+WORKDIR /tmp
+RUN wget https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4_build/ghidra_11.4_PUBLIC_20250620.zip \
+    && unzip ghidra_11.4_PUBLIC_20250620.zip \
+    && mv ghidra_11.4_PUBLIC /opt/ghidra \
+    && rm ghidra_11.4_PUBLIC_20250620.zip
+
+
+# Compile Ghidra decompiler for arm64
+WORKDIR /opt/ghidra/Ghidra/Features/Decompiler/src/decompile/cpp
+COPY decompiler.patch .
+RUN patch Makefile decompiler.patch \
+    && make clean \
+    && make ARCH=aarch64 ghidra_dbg \
+    && mkdir -p /opt/ghidra/Ghidra/Features/Decompiler/os/linux_arm_64/ \
+    && cp ghidra_dbg /opt/ghidra/Ghidra/Features/Decompiler/os/linux_arm_64/decompile \
+    && chmod +x /opt/ghidra/Ghidra/Features/Decompiler/os/linux_arm_64/decompile
+
+
+# Build JADX
+WORKDIR /tmp
+RUN git clone https://github.com/skylot/jadx.git \
+    && cd jadx \
+    && ./gradlew --max-workers 4 dist \
+    && mkdir -p /usr/local/share/jadx \
+    && cp -r build/jadx/* /usr/local/share/jadx/ \
+    && ln -s /usr/local/share/jadx/bin/jadx /usr/local/bin/jadx \
+    && chmod +x /usr/local/share/jadx/bin/jadx \
+    && cd .. \
+    && rm -rf jadx \
+    && rm -rf /root/.gradle
+
+
+# Install Cuttlefish
+RUN wget -qO- https://artifacts.codelinaro.org/artifactory/linaro-372-googlelt-gigabyte-ampere-cuttlefish-installer/gigabyte-ampere-cuttlefish-installer/latest/debian/linaro-glt-gig-archive-bookworm.asc \
+    | tee /etc/apt/trusted.gpg.d/linaro-glt-gig-archive-bookworm.asc && \
+    echo "deb https://artifacts.codelinaro.org/linaro-372-googlelt-gigabyte-ampere-cuttlefish-installer/gigabyte-ampere-cuttlefish-installer/latest/debian bookworm main" \
+    | tee /etc/apt/sources.list.d/linaro-glt-gig-archive-bookworm.list && \
+    apt-get update && apt-get install -y --no-install-recommends cuttlefish-base cuttlefish-user && \
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get clean && \
+    apt-get autoremove --purge -y && \
+    apt-get autoclean
+
+
+# Download and setup Android NDK
+WORKDIR /tmp
+COPY build-ndk.sh /tmp/
+RUN chmod +x /tmp/build-ndk.sh && \
+    /tmp/build-ndk.sh
+
+# Build GDB
+WORKDIR /tmp
+COPY build-gdb.sh /tmp/
+RUN chmod +x /tmp/build-gdb.sh && \
+    /tmp/build-gdb.sh /opt/android-ndk && \
+    mv gdb-android.tar.gz /usr/local/share/
+
+# Build AFL++
+WORKDIR /tmp
+COPY AFLplusplus_android.patch /tmp/
+COPY build-afl.sh /tmp/
+RUN chmod +x /tmp/build-afl.sh && \
+    /tmp/build-afl.sh /opt/android-ndk /tmp/AFLplusplus_android.patch
+
+
+
+# Set up user groups
+#    groupadd -g 123 cvdnetwork && \
+RUN groupadd -g 104 kvm && \
+    groupadd -g 124 httpcvd && \
+    groupadd -g 105 render && \
+    useradd -g httpcvd httpcvd && \
+    usermod -aG kvm,cvdnetwork,render httpcvd && \
+    usermod -aG kvm,cvdnetwork,render root
+
+
+
+
+
+
+# Install Python tools for reverse engineering TODO: venv
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+         androguard \
+         frida-tools
+        # r2pipe \
+        # angr \
+        # z3-solver \
+        # pwntools \
+        # atheris \
+        # boofuzz
+
+
+# Copy configuration files
+COPY sshd_config /etc/ssh/sshd_config
+COPY ca.pub /etc/ssh/
+COPY setup-network.sh /usr/local/sbin/
+COPY entrypoint.sh /usr/local/sbin/entrypoint.sh
+
+# Copy decompiler script
+COPY GhidraDecompiler.java /opt/ghidra/Ghidra/Features/Base/ghidra_scripts/GhidraDecompiler.java
+
+# Copy adb scripts
+COPY adb-sync.sh /usr/local/bin/
+COPY adb-master-afl-monitor.sh /usr/local/bin/
+
+# Set up directories and permissions
+RUN mkdir -p /run/sshd                            && \
+    mkdir -p /root/.ssh                           && \
+    mkdir -p /etc/wireguard                       && \
+    mkdir -p /etc/cuttlefish-common/operator/cert && \
+    mkdir -p /run/cuttlefish                      && \
+    mkdir -p /tmp/info                            && \
+    chmod 700 /run/sshd                           && \
+    chmod 700 /root/.ssh                          && \
+    chmod 700 /etc/wireguard                      && \
+    chmod 700 -R /etc/ssh                         && \
+    chmod 755 /etc/ssh                            && \
+    chmod 755 -R /usr/local/sbin/*                && \
+    chmod 755 -R /usr/local/bin/*                 && \
+    chmod 775 /run/cuttlefish
+
+# needed by wireguard
+RUN echo "net.ipv4.conf.all.src_valid_mark=1" >> /etc/sysctl.conf
+
+ENTRYPOINT ["/usr/local/sbin/entrypoint.sh"]

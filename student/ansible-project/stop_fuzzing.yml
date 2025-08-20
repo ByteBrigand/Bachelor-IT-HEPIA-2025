@@ -1,0 +1,80 @@
+---
+- name: Stop Android Fuzzing
+  hosts: all
+  become: true
+  vars:
+    afl_path: "/data/local/tmp/afl-android/bin/afl-fuzz"
+    output_dir: "/sdcard/shared_files/output"
+    input_dir: "/sdcard/shared_files/input"
+    fuzz_binary_android: "/data/local/tmp/fuzzme"  # Location on Android device
+    # Set to true to preserve output directory (crashes, etc.)
+    preserve_output: false
+
+  tasks:
+    - name: Kill AFL fuzzer processes on Android
+      shell: "adb shell 'pkill -f afl-fuzz' || true"
+      ignore_errors: yes
+
+    - name: Check if output directory exists (if preserving output)
+      when: preserve_output
+      shell: "adb shell 'ls {{ output_dir }}' || true"
+      register: output_dir_check
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Create backup of output directory if it exists and preserve_output is true
+      when: preserve_output and output_dir_check.stdout != ""
+      block:
+        - name: Get current timestamp for backup directory
+          shell: date +%Y%m%d_%H%M%S
+          register: timestamp
+          changed_when: false
+          delegate_to: localhost
+          become: false
+          run_once: true
+
+        - name: Create backup directory on local host
+          delegate_to: localhost
+          become: false
+          run_once: true
+          file:
+            path: "./fuzzing_output_backup_{{ timestamp.stdout }}"
+            state: directory
+            mode: '0755'
+
+        - name: Pull output directory from device to backup location
+          shell: "adb pull {{ output_dir }} ./fuzzing_output_backup_{{ timestamp.stdout }}/"
+          ignore_errors: yes
+
+    # Cleanup shared directory
+    - name: Kill adb-sync.sh process
+      shell: pkill -f adb-sync.sh || true
+      ignore_errors: yes
+  
+    - name: Remove all files on host
+      shell: rm -rf /var/log/adb-sync.log /tmp/adb_sync/* /shared/shared_files/* /shared/staging/*
+      ignore_errors: yes
+
+    - name: Remove all files on device
+      shell: adb shell rm -rf /sdcard/staging/* /sdcard/shared_files/*
+      ignore_errors: yes
+
+    - name: Restart adb-sync.sh
+      shell: nohup /usr/local/bin/adb-sync.sh > /dev/null 2>&1 &
+      ignore_errors: yes
+
+
+    - name: Remove fuzz binary from Android device
+      shell: "adb shell 'rm -f {{ fuzz_binary_android }}' || true"
+      ignore_errors: yes
+
+    - name: Display fuzzing stop message
+      become: false
+      debug:
+        msg: |
+          Fuzzing stopped on Android device.
+          AFL fuzzer processes have been terminated. Fuzzing output directory on device has been removed.
+          {% if preserve_output %}
+          Fuzzing output has been preserved in ./fuzzing_output_backup_{{ timestamp.stdout | default('unknown') }}/ on the control machine.
+          {% endif %}
+      delegate_to: localhost

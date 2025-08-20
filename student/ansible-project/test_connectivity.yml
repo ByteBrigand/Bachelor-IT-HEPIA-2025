@@ -1,0 +1,35 @@
+---
+- name: Test connectivity and sudo access
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Check sudo access
+      command: whoami
+      become: true
+      register: whoami_result
+
+    - name: Display current user
+      debug:
+        msg: "Running as user: {{ whoami_result.stdout }}"
+
+- name: Perform mesh connectivity tests
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: Test mesh connectivity
+      command: "ping -c 1 -W 2 {{ hostvars[item]['ansible_host'] }}"
+      loop: "{{ groups['all'] }}"
+      when: item != inventory_hostname
+      register: ping_results
+      changed_when: false
+      failed_when: false
+
+    - name: Show ping test results
+      debug:
+        msg: >-
+          {{ inventory_hostname }} connectivity:
+          {% for result in ping_results.results %}
+            {% if result.skipped is not defined %}
+              {{ result.item }}({{ 'OK' if result.rc == 0 else 'FAIL' }})
+            {% endif %}
+          {% endfor %}

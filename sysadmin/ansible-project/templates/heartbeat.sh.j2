@@ -1,0 +1,196 @@
+#!/bin/bash
+
+# Enable logging
+exec 1> >(logger -s -t $(basename $0)) 2>&1
+
+SHARED_DIR="{{ gluster_mount_path }}"
+MY_HOSTNAME="{{ inventory_hostname }}"
+MY_NUM="{{ number }}"
+HEARTBEAT_FILE="$SHARED_DIR/heartbeat_${MY_HOSTNAME}"
+MASTER_FILE="$SHARED_DIR/master"
+LAST_NOTIFICATION_FILE="/var/lib/node_monitor/last_notifications"
+LOCKFILE="/var/lock/heartbeat.lock"
+
+logger -t heartbeat "Starting heartbeat check for $MY_HOSTNAME (node number: $MY_NUM)"
+
+# Check if shared directory exists and is mounted
+if [ ! -d "$SHARED_DIR" ]; then
+    logger -t heartbeat "ERROR: Shared directory $SHARED_DIR does not exist, exiting"
+    exit 1
+fi
+
+if ! mountpoint "$SHARED_DIR" &>/dev/null; then
+    logger -t heartbeat "ERROR: $SHARED_DIR is not a mountpoint, exiting"
+    exit 1
+fi
+
+# Use flock to prevent multiple instances
+(
+    flock -n 200 || { logger -t heartbeat "ERROR: Another instance is running, exiting"; exit 1; }
+
+    mkdir -p /var/lib/node_monitor
+
+    # Write heartbeat
+    write_heartbeat() {
+        echo "$(date +%s)" > "$HEARTBEAT_FILE"
+        logger -t heartbeat "Updated heartbeat file for $MY_HOSTNAME"
+    }
+
+    # Read all heartbeats
+    read_heartbeats() {
+        declare -A BEATS
+        logger -t heartbeat "Reading heartbeats from all nodes"
+        for file in $SHARED_DIR/heartbeat_*; do
+            if [ -f "$file" ]; then
+                node=$(basename "$file" | cut -d'_' -f2)
+                timestamp=$(cat "$file")
+                BEATS[$node]=$timestamp
+                logger -t heartbeat "Found heartbeat for $node: $(date -d @$timestamp)"
+            fi
+        done
+        echo "$(declare -p BEATS)"
+    }
+
+
+    # Write master info to all user directories
+    write_master_info() {
+        local master_info="$1"
+        logger -t heartbeat "Writing master info to user directories"
+        
+        # Check if users directory exists
+        if [ ! -d "$SHARED_DIR/users" ]; then
+            logger -t heartbeat "No users directory found at $SHARED_DIR/users"
+            return
+        fi
+        
+        # Iterate through direct user directories
+        for user in $(ls -1 "$SHARED_DIR/users/"); do
+            if [ -d "$SHARED_DIR/users/$user" ]; then
+                local user_master_file="$SHARED_DIR/users/$user/master"
+                
+                # Write master info
+                echo "$master_info" > "$user_master_file"
+                logger -t heartbeat "Updated master file for user $user"
+            fi
+        done
+    }
+
+
+    # Check if I should be master
+    check_master_eligibility() {
+        local current_time=$(date +%s)
+        eval "$(read_heartbeats)"
+        
+        logger -t heartbeat "Checking master eligibility for $MY_HOSTNAME"
+        
+        # Check if current master is active
+        if [ -f "$MASTER_FILE" ]; then
+            master_info=$(cat "$MASTER_FILE")
+            master_host=$(echo "$master_info" | cut -d',' -f1)
+            master_time=$(echo "$master_info" | cut -d',' -f2)
+            
+            logger -t heartbeat "Current master is $master_host (last update: $(date -d @$master_time))"
+            
+            # If master heartbeat is fresh (less than 5 minutes old)
+            if [ $((current_time - ${BEATS[$master_host]:-0})) -lt 300 ]; then
+                logger -t heartbeat "Current master $master_host is active"
+                # If I'm not the master, return
+                if [ "$master_host" != "$MY_HOSTNAME" ]; then
+                    logger -t heartbeat "$MY_HOSTNAME is not master, and current master is active"
+                    return 1
+                fi
+            else
+                logger -t heartbeat "Current master $master_host appears to be down"
+            fi
+        else
+            logger -t heartbeat "No master file found, checking eligibility"
+        fi
+        
+        # Check if any lower-numbered node is active
+        MY_NUM_INT=$((10#$MY_NUM))
+        for i in $(seq -f "%02g" 1 $((MY_NUM_INT - 1))); do
+            node="rpi$i"
+            if [ -n "${BEATS[$node]}" ]; then
+                if [ $((current_time - ${BEATS[$node]})) -lt 300 ]; then
+                    logger -t heartbeat "Lower-numbered node $node is active, cannot be master"
+                    return 1
+                else
+                    logger -t heartbeat "Lower-numbered node $node is inactive (last seen: $(date -d @${BEATS[$node]}))"
+                fi
+            else
+                logger -t heartbeat "No heartbeat found for lower-numbered node $node"
+            fi
+        done
+        
+        logger -t heartbeat "$MY_HOSTNAME is eligible to be master"
+        return 0
+    }
+
+    # Send notification about down nodes (with 24h cooldown)
+    check_and_notify_down_nodes() {
+        eval "$(read_heartbeats)"
+        current_time=$(date +%s)
+        mkdir -p "$(dirname "$LAST_NOTIFICATION_FILE")"
+        touch "$LAST_NOTIFICATION_FILE"
+        
+        logger -t heartbeat "Checking for down nodes"
+        
+        down_nodes=""
+        for node in "${!BEATS[@]}"; do
+            last_beat=${BEATS[$node]}
+            if [ $((current_time - last_beat)) -gt 300 ]; then
+                logger -t heartbeat "Node $node appears to be down (Last seen: $(date -d @$last_beat))"
+                last_notif=$(grep "^$node:" "$LAST_NOTIFICATION_FILE" | cut -d: -f2 || echo 0)
+                if [ $((current_time - $(( 10#${BEATS[$node]:-0} )) )) -gt 300 ]; then
+                    down_nodes+="$node (Last seen: $(date -d @$last_beat))\n"
+                    echo "$node:$current_time" >> "$LAST_NOTIFICATION_FILE.tmp"
+                    logger -t heartbeat "Adding $node to notification list"
+                else
+                    logger -t heartbeat "Skipping notification for $node (last notification was less than 24h ago)"
+                    # Keep existing notification timestamp
+                    grep "^$node:" "$LAST_NOTIFICATION_FILE" >> "$LAST_NOTIFICATION_FILE.tmp"
+                fi
+            else
+                logger -t heartbeat "Node $node is active (Last seen: $(date -d @$last_beat))"
+            fi
+        done
+        
+        # Keep notifications for nodes that aren't down anymore
+        grep -v "^$(echo $down_nodes | tr '\n' '|')" "$LAST_NOTIFICATION_FILE" >> "$LAST_NOTIFICATION_FILE.tmp"
+        mv "$LAST_NOTIFICATION_FILE.tmp" "$LAST_NOTIFICATION_FILE"
+        
+        if [ -n "$down_nodes" ]; then
+            logger -t heartbeat "Sending email notification about down nodes"
+            echo -e "The following nodes are down:\n$down_nodes" | \
+                mail -s "[$(hostname)] Nodes Down Detection" {{ monitoring_email }}
+        else
+            logger -t heartbeat "All nodes appear to be active"
+        fi
+
+        # Cleanup old heartbeat files
+        logger -t heartbeat "Checking for old heartbeat files"
+        for file in $SHARED_DIR/heartbeat_*; do
+            if [ -f "$file" ] && [ $((current_time - $(cat "$file"))) -gt 86400 ]; then
+                logger -t heartbeat "Removing old heartbeat file: $file"
+                rm "$file"
+            fi
+        done
+    }
+
+    # Main loop for heartbeat
+    write_heartbeat
+
+    # Check master eligibility and take action if needed
+    if check_master_eligibility; then
+        master_info="$MY_HOSTNAME,$(date +%s)"
+        logger -t heartbeat "Setting $MY_HOSTNAME as master"
+        echo "$master_info" > "$MASTER_FILE"
+        write_master_info "$master_info"
+        check_and_notify_down_nodes
+    else
+        logger -t heartbeat "$MY_HOSTNAME will remain as slave"
+    fi
+
+    logger -t heartbeat "Heartbeat check completed for $MY_HOSTNAME"
+
+) 200>$LOCKFILE

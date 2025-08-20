@@ -1,0 +1,170 @@
+---
+- name: Start Android Fuzzing
+  hosts: all
+  become: true
+  vars:
+    default_cpu_count: 1
+    fuzz_target_src: fuzzme.c  # Source file on the Ansible control machine
+    fuzz_target_dest: "/root/fuzzme.c"  # Destination on the remote host
+    fuzz_binary_remote: "/root/fuzzme"  # Compiled binary on the remote host
+    fuzz_binary_android: "/data/local/tmp/fuzzme"  # Location on Android device
+    afl_path: "/data/local/tmp/afl-android/bin/afl-fuzz"
+    input_dir: "/sdcard/shared_files/input"
+    output_dir: "/sdcard/shared_files/output"
+    # Default timeout for fuzzing (in seconds) - set to 0 to run indefinitely
+    fuzzing_timeout: 0
+
+  tasks:
+    # Get system information
+    - name: Get number of CPUs
+      shell: getconf _NPROCESSORS_ONLN
+      register: cpu_count
+      changed_when: false
+
+    - name: Get hostname
+      shell: cat /info/hostname
+      register: device_hostname
+      changed_when: false
+
+    # Determine if this is a master or slave
+    - name: Check if this device should be master or slave
+      shell: |
+        hostname=$(cat /info/hostname)
+        if [ -f /shared/master ]; then
+          while IFS=, read -r host _; do
+            if [ "$host" = "$hostname" ]; then
+              echo "master"
+              exit 0
+            fi
+          done < /shared/master
+        fi
+        echo "slave"
+      register: is_master_result
+      changed_when: false
+
+    - name: Set is_master fact
+      set_fact:
+        is_master: "{{ is_master_result.stdout == 'master' }}"
+
+    # Check prerequisites
+    - name: Check if adb is available
+      shell: which adb
+      register: adb_check
+      changed_when: false
+
+    - name: Fail if adb is not available
+      fail:
+        msg: "adb command not found"
+      when: adb_check.rc != 0
+
+    - name: Check if Android device is available via adb
+      shell: adb devices | grep -w device
+      register: adb_devices
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Fail if Android device is not available
+      fail:
+        msg: "Android device not detected via adb"
+      when: adb_devices.stdout_lines | length == 0
+
+    - name: Check if afl-clang-android exists
+      stat:
+        path: /usr/local/bin/afl-clang-android
+      register: afl_compiler_check
+
+    - name: Fail if afl-clang-android is not available
+      fail:
+        msg: "afl-clang-android not found at /usr/local/bin/afl-clang-android"
+      when: not afl_compiler_check.stat.exists
+
+    # Copy and compile the fuzz target
+    - name: Copy fuzz target from local to remote
+      copy:
+        src: "{{ fuzz_target_src }}"
+        dest: "{{ fuzz_target_dest }}"
+        mode: '0644'
+
+    - name: Compile fuzz target for Android
+      shell: "AFL_HARDEN=1 /usr/local/bin/afl-clang-android {{ fuzz_target_dest }} -o {{ fuzz_binary_remote }}"
+      register: android_compile_result
+      ignore_errors: yes
+
+    - name: Fail if compilation failed
+      fail:
+        msg: "Failed to compile fuzz target"
+      when: android_compile_result.rc is defined and android_compile_result.rc != 0
+
+    # Cleanup shared directory
+    - name: Kill adb-sync.sh process
+      shell: pkill -f adb-sync.sh || true
+      ignore_errors: yes
+  
+    - name: Remove all files on host
+      shell: rm -rf /var/log/adb-sync.log /tmp/adb_sync/* /shared/shared_files/* /shared/staging/*
+      ignore_errors: yes
+
+    - name: Remove all files on device
+      shell: adb shell rm -rf /sdcard/staging/* /sdcard/shared_files/*
+      ignore_errors: yes
+
+    - name: Restart adb-sync.sh
+      shell: nohup /usr/local/bin/adb-sync.sh > /dev/null 2>&1 &
+      ignore_errors: yes
+
+    # Prepare Android environment
+    - name: Push fuzz binary to Android device
+      shell: "adb push {{ fuzz_binary_remote }} {{ fuzz_binary_android }}"
+      when: android_compile_result.rc == 0
+
+    - name: Create input and output directories on Android
+      shell: "adb shell mkdir -p {{ input_dir }} {{ output_dir }}"
+      when: android_compile_result.rc == 0
+
+    - name: Create test input file on Android
+      shell: "adb shell 'echo test1 > {{ input_dir }}/test1'"
+      when: android_compile_result.rc == 0
+
+    # Start fuzzing
+    - name: Kill existing AFL fuzzer processes on Android
+      shell: "adb shell 'pkill -f afl-fuzz' || true"
+      ignore_errors: yes
+      when: android_compile_result.rc == 0
+
+    - name: Run AFL fuzzer on Android
+      shell: "adb shell '{{ afl_path }} \
+        {% if is_master and item == 0 %}-M{% else %}-S{% endif %} {{ ansible_hostname }}_{{ item }} \
+        -i {{ input_dir }} \
+        -o {{ output_dir }} \
+        {{ fuzz_binary_android }} > /sdcard/afl-debug-{{ item }}.log 2>&1 &'"
+      when: android_compile_result.rc == 0
+      ignore_errors: yes
+      loop: "{{ range(0, (cpu_count.stdout|int if cpu_count.stdout is defined else default_cpu_count)) | list }}"
+      loop_control:
+        label: "{{ item }}"
+      async: "{{ fuzzing_timeout if fuzzing_timeout > 0 else omit }}"
+      poll: 0
+
+
+    - name: Display fuzzing instructions
+      become: false
+      debug:
+        msg: |
+          AFL fuzzer started on Android device.
+          Fuzzing with {{ cpu_count.stdout | default(default_cpu_count) }} instances.
+          Master instance: {{ is_master }}
+
+          To monitor progress:
+          1. Use 'adb shell' to access the device
+          2. Check the output directory at {{ output_dir }}
+          3. View log files at /sdcard/afl-debug-*.log
+          4. To see fuzzing status, run: adb shell /data/local/tmp/afl-android/bin/afl-whatsup {{ output_dir }}
+              or /usr/local/bin/afl-whatsup /shared/shared_files/output
+
+          {% if fuzzing_timeout > 0 %}
+          Fuzzing will run for {{ fuzzing_timeout }} seconds.
+          {% else %}
+          Fuzzing will run indefinitely.
+          {% endif %}
+      when: android_compile_result.rc == 0
+      delegate_to: localhost

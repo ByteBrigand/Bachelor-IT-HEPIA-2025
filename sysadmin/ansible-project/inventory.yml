@@ -1,0 +1,36 @@
+all:
+  children:
+    rpi_nodes:
+      hosts:
+        rpi01:
+          number: 1
+          ansible_host: 10.222.1.21
+          wireguard_address: "10.10.4.1/24" # of the host
+          wireguard_address_containers: "10.10.5.1/24" # all WG containers on this host have the same address
+          wg_ports:
+            user1: 50101
+            user2: 50102
+        rpi02:
+          number: 2
+          ansible_host: 10.222.1.22
+          wireguard_address: "10.10.4.2/24"
+          wireguard_address_containers: "10.10.5.2/24"
+          wg_ports:
+            user1: 50201
+            user2: 50202
+        rpi03:
+          number: 3
+          ansible_host: 10.222.1.23
+          wireguard_address: "10.10.4.3/24"
+          wireguard_address_containers: "10.10.5.3/24"
+          wg_ports:
+            user1: 50301
+            user2: 50302
+        rpi04:
+          number: 4
+          ansible_host: 10.222.1.24
+          wireguard_address: "10.10.4.4/24"
+          wireguard_address_containers: "10.10.5.4/24"
+          wg_ports:
+            user1: 50401
+            user2: 50402

@@ -1,0 +1,9 @@
+[Interface]
+PrivateKey = {{ wireguard_private_key }}
+Address = {{ wireguard_container_ip }}
+
+[Peer]
+PublicKey = {{ wireguard_client_pubkey }}
+AllowedIPs = {{ wireguard_container_allowed }}
+Endpoint = {{ ansible_host }}:{{ "5%02d%02d" | format(host_number|int, user_number|int) }}
+PersistentKeepalive = 25

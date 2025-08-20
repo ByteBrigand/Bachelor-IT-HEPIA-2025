@@ -1,0 +1,22 @@
+---
+
+
+- name: Tasks to nuke GlusterFS
+  block:
+    - name: Remove user containers
+      become: true
+      become_user: "{{ item.name }}"
+      become_method: machinectl
+      become_exe: 'sudo machinectl'
+      command: podman rm -f "cuttlefish-{{ item.name }}"
+      ignore_errors: yes
+      loop: "{{ users }}"
+
+    - name: Copy and execute the nuke script on the target host
+      script: scripts/nuke-glusterfs.sh
+      args:
+        executable: /bin/bash
+      register: nuke_result
+      changed_when: nuke_result.rc == 0
+
+  tags: gluster_nuke

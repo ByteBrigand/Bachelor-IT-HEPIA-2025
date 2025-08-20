@@ -1,0 +1,66 @@
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table ip filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # Allow established/related connections
+        ct state established,related accept
+
+        # Allow loopback
+        iifname "lo" accept
+
+        # Allow WireGuard
+        udp dport { {{ wireguard_port }}, {{ wireguard_port_clients }} } accept
+
+        # Allow ping for monitoring
+        ip protocol icmp accept
+
+        # Allow SSH
+        tcp dport 22 accept
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+        
+        # Allow established/related connections
+        ct state established,related accept
+        
+        {% for user in users %}
+        # {{ user.name }} container routing
+        # Allow traffic between client and their containers
+        iifname "{{ wg_if_clients }}" ip saddr {{ user.wireguard_ip | regex_replace('/.*$','') }} ip daddr {{ user.container_subnet }} accept
+        ip saddr {{ user.container_subnet }} ip daddr {{ user.wireguard_ip | regex_replace('/.*$','') }} accept
+        
+        # Allow traffic between containers of the same user
+        ip saddr {{ user.container_subnet }} ip daddr {{ user.container_subnet }} accept
+        {% endfor %}
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}
+
+table ip nat {
+    chain prerouting {
+        type nat hook prerouting priority 0;
+    }
+    
+    chain postrouting {
+        type nat hook postrouting priority 100;
+
+        {% for user in users %}
+        # Masquerade container traffic
+        ip saddr {{ user.container_subnet }} masquerade
+        {% endfor %}
+    }
+}
+
+table ip route {
+    chain output {
+        type route hook output priority 0;
+    }
+}

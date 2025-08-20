@@ -1,0 +1,363 @@
+---
+- name: System-level Configuration (Hosts, Packages, Services, Users)
+  block:
+    - name: Add hosts entries for all nodes in the cluster
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ hostvars[item]['ansible_host'] }} {{ item }}"
+        state: present
+      loop: "{{ groups['rpi_nodes'] }}"
+
+    - name: Remove default 127.0.1.1 entry from hosts file
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        state: absent
+
+    - name: Enable IP forwarding in sysctl
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+
+    - name: Install essential system and application packages
+      package:
+        name:
+          - podman
+          - htop
+          - iotop
+          - sysstat
+          - ncdu
+          - inotify-tools
+          - smartmontools
+          - acl
+          - systemd-container
+          - sudo
+          - conmon
+          - attr
+          - libpam-pwquality
+
+          - nftables
+          - wireguard-tools
+          - lsof             # needed by cuttlefish
+
+          - glusterfs-server
+          - glusterfs-client
+
+          - postfix
+          - mailutils
+
+          - openssl
+        state: present
+        update_cache: true
+
+    - name: Start and enable core services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - nftables
+        - sysstat
+        - postfix
+        - glusterd
+
+
+
+# user management
+    - name: Get list of users with UID > 1000 and home directory
+      shell: "getent passwd | awk -F: '($6 ~ /\\/home/ && $3 > 1000) {print $1}'"
+      register: high_uid_users
+      changed_when: false
+
+    - name: Set fact for allowed users
+      set_fact:
+        allowed_users: "{{ users | map(attribute='name') | list }}"
+
+    - name: Find users to delete
+      set_fact:
+        users_to_delete: "{{ high_uid_users.stdout_lines | difference(allowed_users) }}"
+
+    - name: Delete unwanted users
+      user:
+        name: "{{ item }}"
+        state: absent
+        remove: yes
+      loop: "{{ users_to_delete }}"
+
+    - name: Determine which users need to be created
+      set_fact:
+        new_users: "{{ users | rejectattr('name', 'in', high_uid_users.stdout_lines) | list }}"
+
+    - name: Generate random passwords for new users
+      set_fact:
+        user_passwords: >-
+          {{
+            user_passwords | default({}) | combine({item.name: lookup('pipe', 'openssl rand -base64 12')})
+          }}
+      loop: "{{ new_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Create users with passwords for new users
+      user:
+        name: "{{ item.name }}"
+        groups: "{{ item.groups }}"
+        append: yes
+        state: present
+        password: >-
+          {{
+            (user_passwords[item.name] | password_hash('sha512'))
+            if item.name in new_users|map(attribute='name')|list
+            else omit
+          }}
+      loop: "{{ users }}"
+      register: user_creation_result
+
+
+    - name: Create users
+      user:
+        name: "{{ item.name }}"
+        groups: "{{ item.groups }}"
+        append: yes
+        state: present
+      loop: "{{ users }}"
+
+
+
+    - name: Ensure user home directories exist
+      file:
+        path: "/home/{{ item.name }}"
+        state: directory
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0750'
+      loop: "{{ users }}"
+      when: item.name in new_users|map(attribute='name')|list or user_creation_result.results|selectattr('item.name', 'equalto', item.name)|selectattr('changed')|list|length > 0
+
+
+
+    - name: Ensure info directory exists
+      file:
+        path: "/info"
+        state: directory
+        owner: "root"
+        group: "root"
+        mode: '0755'
+      loop: "{{ users }}"
+
+    - name: Ensure user info directories exist
+      file:
+        path: "/info/{{ item.name }}"
+        state: directory
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0700'
+      loop: "{{ users }}"
+
+    - name: Copy WireGuard configuration for containers
+      copy:
+        src: "secrets/wg_configs/{{ inventory_hostname }}_{{ item.name }}-wg1.conf"
+        dest: "/info/{{ item.name }}/wg1.conf"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0600'
+      loop: "{{ users }}"
+
+
+    - name: Copy SSH host keys
+      copy:
+        src: "secrets/ssh_keys/ssh_host_{{ item[1].name }}_{{ item[0] }}"
+        dest: "/info/{{ item[1].name }}/"
+        owner: "{{ item[1].name }}"
+        group: "{{ item[1].name }}"
+        mode: '0600'
+      with_nested:
+        - ["key", "key.pub", "key-cert.pub"]
+        - "{{ users }}"
+
+
+    - name: Create username file
+      copy:
+        content: "{{ item.name }}"
+        dest: "/info/{{ item.name }}/username"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0644'
+      loop: "{{ users }}"
+
+    - name: Create hostname file
+      copy:
+        content: "{{ inventory_hostname }}"
+        dest: "/info/{{ item.name }}/hostname"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0644'
+      loop: "{{ users }}"
+
+    - name: Create number_host file
+      copy:
+        content: "{{ number }}"
+        dest: "/info/{{ item.name }}/number_host"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0644'
+      loop: "{{ users }}"
+
+    - name: Create number_user file
+      copy:
+        content: "{{ item.number }}"
+        dest: "/info/{{ item.name }}/number_user"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0644'
+      loop: "{{ users }}"
+
+    - name: Create container_ip file
+      copy:
+        content: "{{ wireguard_address_containers }}"
+        dest: "/info/{{ item.name }}/container_ip"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0644'
+      loop: "{{ users }}"
+
+    - name: Create container_ips file
+      copy:
+        content: "{% for host in groups['rpi_nodes'] %}{{ hostvars[host].wireguard_address_containers }}
+{% endfor %}"
+        dest: "/info/{{ item.name }}/container_ips"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0644'
+      loop: "{{ users }}"
+
+
+# Get user UIDs for firewall
+    - name: Get user info
+      user:
+        name: "{{ item.name }}"
+        state: present
+      check_mode: yes
+      register: user_info
+      loop: "{{ users }}"
+
+    - name: Set UIDs fact
+      set_fact:
+        user_uids: "{{ dict(users|map(attribute='name')|zip(user_info.results|map(attribute='uid'))) }}"
+
+
+# firewall
+    - name: Flush all nftables rules
+      command: nft flush ruleset
+      ignore_errors: yes
+
+    - name: Create nftables filter table
+      command: nft add table inet filter
+      failed_when: false  # Don't fail if table exists
+
+    - name: Create output chain
+      command: nft add chain inet filter output { type filter hook output priority 0 \; }
+      failed_when: false  # Don't fail if chain exists
+
+    - name: Add established/related rule
+      command: >
+        nft add rule inet filter output
+        ct state established,related
+        counter
+        accept
+      when: "'established,related' not in (nft_rules.stdout | default(''))"
+
+    - name: Initialize empty list for WireGuard rules
+      set_fact:
+        wg_rules: []
+
+    - name: Build list of WireGuard rules (fixed)
+      set_fact:
+        wg_rules: >-
+          {%- set rules = [] -%}
+          {%- for host in groups['rpi_nodes'] | difference([inventory_hostname]) -%}
+            {%- if host in hostvars and 'wg_ports' in hostvars[host] -%}
+              {%- for user in users -%}
+                {%- if user.name in hostvars[host]['wg_ports'] and user.name in user_uids -%}
+                  {%- set rule = {
+                    'user': user.name,
+                    'target_host': host,
+                    'port': hostvars[host]['wg_ports'][user.name],
+                    'ip': hostvars[host]['ansible_host']
+                  } -%}
+                  {%- set _ = rules.append(rule) -%}
+                {%- endif -%}
+              {%- endfor -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ rules }}
+
+    - name: Add firewall rules to allow WireGuard UDP traffic for users
+      command: >
+        nft add rule inet filter output
+        skuid {{ user_uids[item.user] }}
+        udp dport {{ item.port }}
+        ip daddr {{ item.ip }}
+        counter
+        accept
+      loop: "{{ wg_rules }}"
+      when: inventory_hostname in groups['rpi_nodes'] and (wg_rules | length > 0)
+      ignore_errors: yes
+
+    - name: Add blocking rules for users
+      command: >
+        nft add rule inet filter output 
+        ct state new
+        skuid {{ user_uids[item.name] }}
+        counter
+        drop
+      when: "user_uids[item.name] | string not in (nft_rules.stdout | default(''))"
+      loop: "{{ users }}"
+
+
+
+
+# CPU set to fixed frequency with performance governor, as required by AFL++
+    - name: Set CPU governor to performance
+      shell: echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+      changed_when: true
+
+    - name: Get max CPU frequency
+      shell: cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq
+      register: max_freq
+      changed_when: false
+
+    - name: Set CPU to max frequency
+      shell: "echo {{ max_freq.stdout }} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq"
+      changed_when: true
+
+
+# Password complexity
+
+    - name: Set password complexity requirements
+      lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: '^minlen', line: 'minlen = 12' }                  # Minimum password length
+        - { regexp: '^dcredit', line: 'dcredit = -1' }               # Require at least 1 digit
+        - { regexp: '^ucredit', line: 'ucredit = -1' }               # Require at least 1 uppercase
+        - { regexp: '^lcredit', line: 'lcredit = -1' }               # Require at least 1 lowercase
+        - { regexp: '^ocredit', line: 'ocredit = -1' }               # Require at least 1 special char
+        - { regexp: '^difok', line: 'difok = 3' }                    # Require at least 3 chars different from old password
+        - { regexp: '^maxrepeat', line: 'maxrepeat = 3' }            # Max 3 consecutive same chars
+        - { regexp: '^enforce_for_root', line: 'enforce_for_root' }   # Apply to root user too
+
+    - name: Configure PAM to use password quality
+      lineinfile:
+        path: /etc/pam.d/common-password
+        regexp: '^password\s+requisite\s+pam_pwquality.so'
+        line: 'password        requisite                       pam_pwquality.so retry=3'
+        state: present
+
+  tags: all_tasks, system

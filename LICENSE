@@ -1,3 +1,29 @@
+This project was developed by Stefan Antun (stefan+antun@sonarino.com) in 2025 as part of their Bachelor Thesis at HEPIA, Genève, Switzerland.
+
+It is licensed under the Apache License 2.0. The full text of the license is included below.
+Exception for the GDB patches, which are licensed under the GPL.
+
+This project applies modifications to several components, each with its own license:
+
+1. Android NDK:
+   - License: The license for the Android NDK is included in the file LICENSE_NDK and is also available online at https://android.googlesource.com/platform/prebuilts/ndk/+/master/NOTICE.
+   - Modifications: Described in sysadmin/ansible-project/cuttlefish-container/build-ndk.sh.
+
+2. GDB (GNU Debugger):
+   - License: Licensed under the GNU General Public License (GPL). The full text of the GPL is included in the file LICENSE_GPL.
+   - Modifications: Described in sysadmin/ansible-project/cuttlefish-container/build-gdb.sh.
+
+3. AFL++:
+   - License: Licensed under the Apache License 2.0. The full text of the license is included below.
+   - Modifications: Described in sysadmin/ansible-project/cuttlefish-container/AFLplus_android.patch.
+
+4. Ghidra:
+   - License: Licensed under the Apache License 2.0. The full text of the license is included below.
+   - Modifications: Described in sysadmin/ansible-project/cuttlefish-container/decompiler.patch.
+
+Follows the full text of the Apache License 2.0:
+
+
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/

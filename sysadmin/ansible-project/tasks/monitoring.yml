@@ -1,0 +1,94 @@
+---
+- name: Deploy Monitoring and Heartbeat
+  block:
+    - name: Install dependencies for monitoring scripts
+      package:
+        name:
+          - mailutils     # For sending email alerts
+          - util-linux    # Provides 'flock' for the heartbeat script lockfile
+        state: present
+
+    - name: Create state directory for the heartbeat script
+      file:
+        path: /var/lib/node_monitor
+        state: directory
+        mode: '0755'
+
+    - name: Install heartbeat script
+      template:
+        src: templates/heartbeat.sh.j2
+        dest: /usr/local/bin/heartbeat.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install heartbeat systemd service and timer files
+      template:
+        src: "templates/{{ item }}"
+        dest: "/etc/systemd/system/{{ item | regex_replace('.j2$', '') }}"
+      loop:
+        - heartbeat.service.j2
+        - heartbeat.timer.j2
+      notify: Reload systemd
+
+
+
+
+
+    - name: Check if GlusterFS mount point exists
+      stat:
+        path: "{{ gluster_mount_path }}/users"
+      register: gluster_mount
+      until: gluster_mount.stat.exists
+      retries: 6
+      delay: 10
+
+    - name: Fail if GlusterFS is not mounted
+      fail:
+        msg: "GlusterFS mount point {{ gluster_mount_path }}/users is not available after 60 seconds"
+      when: not gluster_mount.stat.exists
+
+
+
+    - name: Enable and start the heartbeat timer
+      systemd:
+        name: heartbeat.timer
+        state: started
+        enabled: yes
+
+
+    - name: Install disk space monitoring script
+      template:
+        src: templates/check-disk-space.sh.j2
+        dest: /usr/local/bin/check-disk-space.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Add disk monitoring cron job
+      cron:
+        name: "Check disk space"
+        minute: "*/15" # Check every 15 minutes
+        job: "/usr/local/bin/check-disk-space.sh"
+        state: present
+
+    - name: Ensure sysstat collection is enabled
+      lineinfile:
+        path: /etc/default/sysstat
+        regexp: '^ENABLED='
+        line: 'ENABLED="true"'
+      notify: Restart sysstat
+
+    - name: Configure sysstat data collection interval to every 10 minutes
+      copy:
+        dest: /etc/cron.d/sysstat
+        content: |
+          # Run system activity accounting tool every 10 minutes
+          */10 * * * * root /usr/lib/sysstat/sa1 1 1
+          # Generate a daily summary of process accounting at 23:53
+          53 23 * * * root /usr/lib/sysstat/sa2 -A
+      notify: Restart sysstat
+
+  tags: all_tasks, monitoring
+
+

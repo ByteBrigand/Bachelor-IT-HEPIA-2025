@@ -1,0 +1,1315 @@
+diff -ruN orig/frida_mode/GNUmakefile modified/frida_mode/GNUmakefile
+--- orig/frida_mode/GNUmakefile	2025-06-28 22:29:37.000000000 +0200
++++ modified/frida_mode/GNUmakefile	2025-08-17 12:56:37.818901672 +0200
+@@ -15,7 +15,6 @@
+ SOURCES:=$(wildcard $(SRC_DIR)**/*.c) $(wildcard $(SRC_DIR)*.c)
+ OBJS:=$(foreach src,$(SOURCES),$(OBJ_DIR)$(notdir $(patsubst %.c, %.o, $(src))))
+ 
+-XTOOLS_HOST?=x86_64-linux-gnu
+ TARGET_CC?=$(CC)
+ TARGET_CXX?=$(CXX)
+ HOST_CC?=$(CC)
+@@ -23,50 +22,116 @@
+ TARGET_CC_INFO=$(shell $(TARGET_CC) --version)
+ IS_IOS:=$(findstring ios, $(TARGET_CC_INFO))
+ IS_SIMULATOR:=$(findstring sim, $(TARGET_CC_INFO))
+-IS_ANDROID:=$(findstring android, $(TARGET_CC_INFO))
++IS_ANDROID:=$(or $(findstring android, $(TARGET_CC_INFO)), $(findstring Android, $(SYS)), $(findstring android, $(SYS)))
+ IS_x86:=$(findstring i686, $(TARGET_CC_INFO))
+ IS_x86_64:=$(findstring x86_64, $(TARGET_CC_INFO))
+ IS_ARM:=$(findstring arm, $(TARGET_CC_INFO))
+ IS_ARM64E:=$(findstring arm64e, $(TARGET_CC_INFO))
+-IS_ARM64 := $(or $(findstring aarch64,$(TARGET_CC_INFO)), $(findstring arm64,$(TARGET_CC_INFO)))
++IS_ARM64 := $(or $(findstring aarch64,$(TARGET_CC_INFO)), $(findstring arm64,$(ARCH)), $(findstring aarch64,$(ARCH)))
++
++ifndef ARCH
++ARCH=$(shell uname -m)
++ifeq "$(ARCH)" "aarch64"
++ ARCH:=arm64
++endif
++ifeq "$(ARCH)" "armv7l"
++ ARCH:=armhf
++endif
++ifeq "$(ARCH)" "i686"
++ ARCH:=x86
++endif
++endif
++
++ifdef IS_ANDROID
++  NDK_DIR?=/opt/android-ndk
++  API_LEVEL?=33
++  
++  TOOLCHAIN_DIR?=$(NDK_DIR)/toolchains/llvm/prebuilt/linux-x86_64
++  SYSROOT_DIR?=$(TOOLCHAIN_DIR)/sysroot
++
++  ifdef IS_x86_64
++    TARGET_TRIPLE:=x86_64-linux-android
++    XTOOLS_HOST:=$(TARGET_TRIPLE)
++  else ifdef IS_x86
++    TARGET_TRIPLE:=i686-linux-android
++    XTOOLS_HOST:=$(TARGET_TRIPLE)
++  else ifdef IS_ARM64
++    TARGET_TRIPLE:=aarch64-linux-android
++    XTOOLS_HOST:=$(TARGET_TRIPLE)
++  else ifdef IS_ARM
++    TARGET_TRIPLE:=armv7a-linux-androideabi
++    XTOOLS_HOST:=arm-linux-androideabi
++  endif
++
++  TARGET_CC:=$(TOOLCHAIN_DIR)/bin/$(TARGET_TRIPLE)$(API_LEVEL)-clang
++  TARGET_CXX:=$(TOOLCHAIN_DIR)/bin/$(TARGET_TRIPLE)$(API_LEVEL)-clang++
++  TARGET_AR=$(TOOLCHAIN_DIR)/bin/llvm-ar
++
++else
++  # Non-Android cross-compilation settings
++  ifdef IS_x86_64
++    XTOOLS_HOST?=x86_64-linux-gnu
++  else ifdef IS_x86
++    XTOOLS_HOST?=i686-linux-gnu
++  else ifdef IS_ARM64
++    XTOOLS_HOST?=aarch64-linux-gnu
++  else ifdef IS_ARM
++    XTOOLS_HOST?=arm-linux-gnueabihf
++  endif
++endif
++
++
++# Base CFLAGS
+ CFLAGS+=-fPIC \
+-		-D_GNU_SOURCE \
+-		-D_FORTIFY_SOURCE=2 \
+-		-g \
+-		-O3 \
+-		-funroll-loops \
+-		-ffunction-sections \
++        -D_GNU_SOURCE \
++        -D_FORTIFY_SOURCE=2 \
++        -g \
++        -O3 \
++        -funroll-loops \
++        -ffunction-sections
+ 
++# Android-specific CFLAGS
+ ifdef IS_ANDROID
+-CFLAGS+=-DANDROID
++CFLAGS+=-DANDROID \
++        -I$(SYSROOT_DIR)/usr/include \
++        -I$(SYSROOT_DIR)/usr/include/$(XTOOLS_HOST)
+ endif
+ 
++# Warning flags
+ AFL_CFLAGS:=-Wno-unused-parameter \
+-		   -Wno-sign-compare \
+-		   -Wno-unused-function \
+-		   -Wno-unused-result \
+-		   -Wno-int-to-pointer-cast \
+-		   -Wno-pointer-sign
++           -Wno-sign-compare \
++           -Wno-unused-function \
++           -Wno-unused-result \
++           -Wno-int-to-pointer-cast \
++           -Wno-pointer-sign
+ 
++# LDFLAGS
+ ifdef IS_ANDROID
+ LDFLAGS+= -static-libstdc++ \
+-		  -DANDROID \
+-		  -llog \
+-		  -shared
++          -DANDROID \
++          -llog \
++          -L$(SYSROOT_DIR)/usr/lib/$(XTOOLS_HOST)/$(API_LEVEL) \
++          -L$(TOOLCHAIN_DIR)/lib64 \
++          -shared
+ else
+ LDFLAGS+=-shared \
+-		 -lpthread \
+-		 -lresolv
++         -lpthread \
++         -lresolv \
++         -z noexecstack \
++         -Wl,--gc-sections \
++         -Wl,--exclude-libs,ALL \
++         -ldl
+ endif
+ 
++# Debug flags
+ ifdef DEBUG
+ CFLAGS+=-Werror \
+-		-Wall \
+-		-Wextra \
+-		-Wpointer-arith \
+-		-Wno-unknown-pragmas \
+-		-Wno-pointer-to-int-cast \
+-		-Wno-int-to-pointer-cast
++        -Wall \
++        -Wextra \
++        -Wpointer-arith \
++        -Wno-unknown-pragmas \
++        -Wno-pointer-to-int-cast \
++        -Wno-int-to-pointer-cast
+ else
+ CFLAGS+=-Wno-pointer-arith
+ endif
+@@ -189,8 +254,32 @@
+ 
+ GUM_DEVKIT_VERSION=17.0.7
+ GUM_DEVKIT_FILENAME=frida-gumjs-devkit-$(GUM_DEVKIT_VERSION)-$(OS)-$(ARCH).tar.xz
++
++ifdef IS_ANDROID
++  ifdef IS_x86_64
++    GUM_DEVKIT_FILENAME=frida-gumjs-devkit-$(GUM_DEVKIT_VERSION)-android-x86_64.tar.xz
++  else ifdef IS_x86
++    GUM_DEVKIT_FILENAME=frida-gumjs-devkit-$(GUM_DEVKIT_VERSION)-android-x86.tar.xz
++  else ifdef IS_ARM64
++    GUM_DEVKIT_FILENAME=frida-gumjs-devkit-$(GUM_DEVKIT_VERSION)-android-arm64.tar.xz
++  else ifdef IS_ARM
++    GUM_DEVKIT_FILENAME=frida-gumjs-devkit-$(GUM_DEVKIT_VERSION)-android-arm.tar.xz
++  endif
++else
++  ifdef IS_x86_64
++    GUM_DEVKIT_FILENAME=frida-gumjs-devkit-$(GUM_DEVKIT_VERSION)-linux-x86_64.tar.xz
++  else ifdef IS_x86
++    GUM_DEVKIT_FILENAME=frida-gumjs-devkit-$(GUM_DEVKIT_VERSION)-linux-x86.tar.xz
++  else ifdef IS_ARM64
++    GUM_DEVKIT_FILENAME=frida-gumjs-devkit-$(GUM_DEVKIT_VERSION)-linux-arm64.tar.xz
++  else ifdef IS_ARM
++    GUM_DEVKIT_FILENAME=frida-gumjs-devkit-$(GUM_DEVKIT_VERSION)-linux-arm.tar.xz
++  endif
++endif
++
+ GUM_DEVKIT_URL="https://github.com/frida/frida/releases/download/$(GUM_DEVKIT_VERSION)/$(GUM_DEVKIT_FILENAME)"
+ 
++
+ GUM_DEVKIT_TARBALL:=$(FRIDA_BUILD_DIR)$(GUM_DEVKIT_FILENAME)
+ GUM_DEVIT_HEADER=$(FRIDA_BUILD_DIR)frida-gumjs.h
+ GUM_DEVIT_LIBRARY=$(FRIDA_BUILD_DIR)libfrida-gumjs.a
+@@ -232,21 +321,78 @@
+ arm:
+ 	XTOOLS_HOST=arm-linux-gnueabihf CFLAGS="-marm" LDFLAGS="-marm" ARCH="armhf" TARGET_CC=arm-linux-gnueabihf-gcc TARGET_CXX=arm-linux-gnueabihf-g++ make all
+ 
++ifdef IS_ANDROID
++arm64:
++	XTOOLS_HOST=aarch64-linux-android \
++	ARCH="arm64" \
++	TARGET_CC="$(NDK_DIR)/toolchains/llvm/prebuilt/linux-aarch64/bin/aarch64-linux-android$(API_LEVEL)-clang" \
++	TARGET_CXX="$(NDK_DIR)/toolchains/llvm/prebuilt/linux-aarch64/bin/aarch64-linux-android$(API_LEVEL)-clang++" \
++	TARGET_AR="$(NDK_DIR)/toolchains/llvm/prebuilt/linux-aarch64/bin/llvm-ar" \
++	CFLAGS+="-L$(NDK_DIR)/toolchains/llvm/prebuilt/linux-aarch64/sysroot/usr/lib/aarch64-linux-android/$(API_LEVEL)" \
++	LDFLAGS+="-L$(NDK_DIR)/toolchains/llvm/prebuilt/linux-aarch64/sysroot/usr/lib/aarch64-linux-android/$(API_LEVEL)" \
++	make all
++else
+ arm64:
+ 	XTOOLS_HOST=aarch64-linux-gnu ARCH="arm64" TARGET_CC=aarch64-linux-gnu-gcc TARGET_CXX=aarch64-linux-gnu-g++ make all
++endif
++
++
++############################# BUILD DIRECTORIES ###############################
+ 
+ $(BUILD_DIR):
+-	mkdir -p $(BUILD_DIR)
++	mkdir -p $@
+ 
+ $(OBJ_DIR): | $(BUILD_DIR)
+ 	mkdir -p $@
+ 
+-############################# DEVKIT ###########################################
+-
+ $(FRIDA_BUILD_DIR): | $(BUILD_DIR)
+ 	mkdir -p $@
+ 
+-#TODO Set architecture
++############################# ALL #############################################
++
++all: $(BUILD_DIR) $(OBJ_DIR) $(FRIDA_BUILD_DIR) $(FRIDA_TRACE) $(FRIDA_TRACE_LIB) $(AFLPP_FRIDA_DRIVER_HOOK_OBJ) $(AFLPP_QEMU_DRIVER_HOOK_OBJ) $(ADDR_BIN)
++
++32:
++	$(MAKE) all \
++		XTOOLS_HOST=i686-linux-gnu \
++		ARCH=x86 \
++		CFLAGS="$(CFLAGS) -m32" \
++		LDFLAGS="$(LDFLAGS) -m32"
++
++arm:
++	$(MAKE) all \
++		XTOOLS_HOST=arm-linux-gnueabihf \
++		ARCH=armhf \
++		TARGET_CC=arm-linux-gnueabihf-gcc \
++		TARGET_CXX=arm-linux-gnueabihf-g++ \
++		CFLAGS="$(CFLAGS) -marm" \
++		LDFLAGS="$(LDFLAGS) -marm"
++
++arm64:
++ifdef IS_ANDROID
++	$(MAKE) all \
++		OS=android \
++		ARCH=arm64 \
++		XTOOLS_HOST=aarch64-linux-android \
++		TARGET_CC="$(TOOLCHAIN_DIR)/bin/$(TARGET_TRIPLE)$(API_LEVEL)-clang" \
++		TARGET_CXX="$(TOOLCHAIN_DIR)/bin/$(TARGET_TRIPLE)$(API_LEVEL)-clang++" \
++		TARGET_AR="$(TOOLCHAIN_DIR)/bin/llvm-ar" \
++		CFLAGS="$(CFLAGS) \
++			-I$(SYSROOT_DIR)/usr/include \
++			-I$(SYSROOT_DIR)/usr/include/$(XTOOLS_HOST)" \
++		LDFLAGS="$(LDFLAGS) \
++			-L$(SYSROOT_DIR)/usr/lib/$(XTOOLS_HOST)/$(API_LEVEL) \
++			-L$(TOOLCHAIN_DIR)/lib64"
++else
++	$(MAKE) all \
++		XTOOLS_HOST=aarch64-linux-gnu \
++		ARCH=arm64 \
++		TARGET_CC=aarch64-linux-gnu-gcc \
++		TARGET_CXX=aarch64-linux-gnu-g++
++endif
++
++############################# DEVKIT ###########################################
++
+ ifdef FRIDA_SOURCE
+ $(FRIDA_MAKEFILE): | $(BUILD_DIR)
+ 	git clone https://github.com/frida/frida-gum.git $(FRIDA_DIR)
+@@ -261,30 +407,27 @@
+ .PHONY: $(GUM_DEVIT_LIBRARY)
+ 
+ $(GUM_DEVIT_LIBRARY): $(FRIDA_MAKEFILE) | $(FRIDA_BUILD_DIR)
+-	echo $(GUM_DEVIT_LIBRARY) $(FRIDA_MAKEFILE) $(FRIDA_BUILD_DIR)
+ 	cd $(FRIDA_DIR) && make FRIDA_V8=disabled
+ 	cp $(FRIDA_DIR)build/bindings/gumjs/devkit/frida-gumjs.h $(GUM_DEVIT_HEADER)
+ 	cp $(FRIDA_DIR)build/bindings/gumjs/devkit/libfrida-gumjs.a $(GUM_DEVIT_LIBRARY)
+ 
+-ifeq "$(OS)" "android"
+-CFLAGS += -static-libstdc++
+-endif
+-
+ else
+ $(GUM_DEVKIT_TARBALL): | $(FRIDA_BUILD_DIR)
+-	wget -qO $@ $(GUM_DEVKIT_URL) || curl -L -o $@ $(GUM_DEVKIT_URL)
++	@echo "Downloading $(GUM_DEVKIT_URL)"
++	@wget -qO $@ $(GUM_DEVKIT_URL) || curl -L -o $@ $(GUM_DEVKIT_URL)
+ 
+ $(GUM_DEVIT_LIBRARY): $(GUM_DEVKIT_TARBALL)
+-	tar Jxvfm $(GUM_DEVKIT_TARBALL) -C $(FRIDA_BUILD_DIR)
++	@echo "Extracting $(GUM_DEVKIT_TARBALL)"
++	@tar Jxf $(GUM_DEVKIT_TARBALL) -C $(FRIDA_BUILD_DIR)
+ 
+ $(GUM_DEVIT_HEADER): $(GUM_DEVKIT_TARBALL)
+-	tar Jxvfm $(GUM_DEVKIT_TARBALL) -C $(FRIDA_BUILD_DIR)
++	@echo "Extracting $(GUM_DEVKIT_TARBALL)"
++	@tar Jxf $(GUM_DEVKIT_TARBALL) -C $(FRIDA_BUILD_DIR)
+ endif
+ 
++############################# AFL COMPONENTS #################################
+ 
+-
+-############################## AFL #############################################
+-$(AFL_COMPILER_RT_OBJ): $(AFL_COMPILER_RT_SRC) $(ROOT)include/config.h
++$(AFL_COMPILER_RT_OBJ): $(AFL_COMPILER_RT_SRC) $(ROOT)include/config.h | $(OBJ_DIR)
+ 	$(TARGET_CC) \
+ 		$(CFLAGS) \
+ 		$(AFL_CFLAGS) \
+@@ -293,7 +436,7 @@
+ 		-o $@ \
+ 		-c $<
+ 
+-$(AFL_PERFORMANCE_OBJ): $(AFL_PERFORMANCE_SRC)
++$(AFL_PERFORMANCE_OBJ): $(AFL_PERFORMANCE_SRC) | $(OBJ_DIR)
+ 	$(TARGET_CC) \
+ 		$(CFLAGS) \
+ 		$(AFL_CFLAGS) \
+@@ -302,9 +445,9 @@
+ 		-o $@ \
+ 		-c $<
+ 
+-############################### JS #############################################
++############################# JS COMPONENTS ##################################
+ 
+-$(BIN2C): $(BIN2C_SRC)
++$(BIN2C): $(BIN2C_SRC) | $(BUILD_DIR)
+ 	$(HOST_CC) -D_GNU_SOURCE -o $@ $<
+ ifdef IS_IOS
+ ifeq ($(HOST_CC),$(TARGET_CC))
+@@ -312,10 +455,10 @@
+ endif
+ endif
+ 
+-$(JS_SRC): $(JS) $(BIN2C)| $(BUILD_DIR)
++$(JS_SRC): $(JS) $(BIN2C) | $(BUILD_DIR)
+ 	cd $(JS_DIR) && $(BIN2C) api_js $(JS) $@
+ 
+-$(JS_OBJ): $(JS_SRC) GNUmakefile
++$(JS_OBJ): $(JS_SRC) GNUmakefile | $(OBJ_DIR)
+ 	$(TARGET_CC) \
+ 		$(CFLAGS) \
+ 		-I $(ROOT)include \
+@@ -324,7 +467,7 @@
+ 		-c $< \
+ 		-o $@
+ 
+-############################# SOURCE ###########################################
++############################# SOURCE FILES ##################################
+ 
+ define BUILD_SOURCE
+ $(2): $(1) $(INCLUDES) $(GUM_DEVIT_HEADER) | $(OBJ_DIR)
+@@ -339,7 +482,7 @@
+ 
+ $(foreach src,$(SOURCES),$(eval $(call BUILD_SOURCE,$(src),$(OBJ_DIR)$(notdir $(patsubst %.c, %.o, $(src))))))
+ 
+-######################## AFL-FRIDA-TRACE #######################################
++######################## AFL-FRIDA-TRACE ###################################
+ 
+ $(FRIDA_TRACE): $(GUM_DEVIT_LIBRARY) $(GUM_DEVIT_HEADER) $(OBJS) $(JS_OBJ) $(AFL_COMPILER_RT_OBJ) $(AFL_PERFORMANCE_OBJ) GNUmakefile | $(BUILD_DIR)
+ 	$(TARGET_CXX) \
+@@ -364,9 +507,9 @@
+ 		$(OBJS) \
+ 		$(JS_OBJ) \
+ 		$(AFL_COMPILER_RT_OBJ) \
+-		$(AFL_PERFORMANCE_OBJ) \
++		$(AFL_PERFORMANCE_OBJ)
+ 
+-############################# HOOK #############################################
++############################# HOOKS ########################################
+ 
+ $(AFLPP_FRIDA_DRIVER_HOOK_OBJ): $(AFLPP_FRIDA_DRIVER_HOOK_SRC) $(GUM_DEVIT_HEADER) | $(BUILD_DIR)
+ 	$(TARGET_CC) $(CFLAGS) $(LDFLAGS) -I $(FRIDA_BUILD_DIR) $< -o $@
+@@ -380,9 +523,8 @@
+ 	@ldid -S../entitlements.plist $@ && echo "[+] Signed $@" || { echo "[-] Failed to sign $@"; }
+ endif
+ 
+-hook: $(AFLPP_FRIDA_DRIVER_HOOK_OBJ) $(AFLPP_QEMU_DRIVER_HOOK_OBJ)
++############################# ADDR #########################################
+ 
+-############################# ADDR #############################################
+ ifneq "$(OS)" "android"
+ $(ADDR_BIN): $(ADDR_SRC) | $(BUILD_DIR)
+ 	-$(TARGET_CC) \
+@@ -411,7 +553,6 @@
+ 		-ldl \
+ 		$< -o $@
+ endif
+-addr: $(ADDR_BIN)
+ 
+ ############################# CLEAN ############################################
+ clean:
+diff -ruN orig/GNUmakefile modified/GNUmakefile
+--- orig/GNUmakefile	2025-06-28 22:29:37.000000000 +0200
++++ modified/GNUmakefile	2025-08-16 11:39:03.164257142 +0200
+@@ -19,7 +19,23 @@
+ # so use a variable for '#'
+ HASH=\#
+ 
+-PREFIX      ?= /usr/local
++$(info SYS = $(SYS))
++$(info ARCH = $(ARCH))
++
++ifndef SYS
++  SYS = $(shell uname -s)
++endif
++
++ifndef ARCH
++  ARCH = $(shell uname -m)
++endif
++
++ifeq "$(SYS)" "Android"
++	PREFIX      ?= /opt/afl-android
++else
++	PREFIX      ?= /usr/local
++endif
++
+ BIN_PATH     = $(PREFIX)/bin
+ HELPER_PATH  = $(PREFIX)/lib/afl
+ DOC_PATH     = $(PREFIX)/share/doc/afl
+@@ -36,9 +52,6 @@
+ MANPAGES=$(foreach p, $(PROGS) $(SH_PROGS), $(p).8)
+ ASAN_OPTIONS=detect_leaks=0
+ 
+-SYS = $(shell uname -s)
+-ARCH = $(shell uname -m)
+-
+ $(info [*] Compiling AFL++ for OS $(SYS) on ARCH $(ARCH))
+ 
+ ifdef NO_UTF
+@@ -141,7 +154,11 @@
+   PYTHON_INCLUDE = /
+ 
+   override CFLAGS_OPT += -static
+-  override LDFLAGS += -lm -lpthread -lz -lutil
++  ifeq "$(SYS)" "Android"
++	override LDFLAGS += -lm -lz -pthread
++  else
++  	override LDFLAGS += -lm -lpthread -lz -lutil
++  endif
+ endif
+ 
+ ifdef PROFILING
+@@ -204,6 +221,45 @@
+   #SPECIAL_PERFORMANCE += -DUSEMMAP=1
+ endif
+ 
++ifeq "$(SYS)" "Android"
++  # Expecting: make SYS=Android NDK_DIR=/path/to/android-ndk ARCH=aarch64 API_LEVEL=33
++
++  SHMAT_OK=1
++
++  # Map ARCH to TARGET_TRIPLE
++  ifeq "$(ARCH)" "aarch64"
++    TARGET_TRIPLE := aarch64-linux-android
++  else ifeq "$(ARCH)" "armv7"
++    TARGET_TRIPLE := armv7a-linux-androideabi
++  else ifeq "$(ARCH)" "x86_64"
++    TARGET_TRIPLE := x86_64-linux-android
++  else ifeq "$(ARCH)" "x86"
++    TARGET_TRIPLE := i686-linux-android
++  else
++    $(error Unsupported ARCH '$(ARCH)'; use aarch64, armv7, x86_64, or x86)
++  endif
++
++  HOST_ARCH := $(shell uname -m)
++
++  ifeq ($(HOST_ARCH),x86_64)
++    NDK_HOST_PLATFORM := linux-x86_64
++  else ifeq ($(HOST_ARCH),aarch64)
++    NDK_HOST_PLATFORM := linux-aarch64
++  else
++    $(error Unsupported host architecture '$(HOST_ARCH)'; use x86_64 or aarch64)
++  endif
++
++  TOOLCHAIN_DIR := $(NDK_DIR)/toolchains/llvm/prebuilt/$(NDK_HOST_PLATFORM)
++  NDK_SYSROOT   := $(TOOLCHAIN_DIR)/sysroot
++
++  override CC  := $(TOOLCHAIN_DIR)/bin/$(TARGET_TRIPLE)$(API_LEVEL)-clang
++  override CXX := $(TOOLCHAIN_DIR)/bin/$(TARGET_TRIPLE)$(API_LEVEL)-clang++
++
++  override CFLAGS  += --sysroot=$(NDK_SYSROOT) -D__ANDROID__ -fPIE -I$(NDK_SYSROOT)/usr/include
++  override LDFLAGS += --sysroot=$(NDK_SYSROOT) -pie
++
++endif
++
+ AFL_FUZZ_FILES = $(wildcard src/afl-fuzz*.c)
+ 
+ ifneq "$(shell command -v python3m 2>/dev/null)" ""
+@@ -308,12 +364,18 @@
+ 	ASAN_LDFLAGS=-fsanitize=address -fstack-protector-all -fno-omit-frame-pointer -fno-lto
+ endif
+ 
+-ifeq "$(shell echo '$(HASH)include <sys/ipc.h>@$(HASH)include <sys/shm.h>@int main() { int _id = shmget(IPC_PRIVATE, 65536, IPC_CREAT | IPC_EXCL | 0600); shmctl(_id, IPC_RMID, 0); return 0;}' | tr @ '\n' | $(CC) $(CFLAGS) -x c - -o .test2 2>/dev/null && echo 1 || echo 0 ; rm -f .test2 )" "1"
++
++ifeq "$(SYS)" "Android"
++# we use custom overrides in android-ashmem.h
+ 	SHMAT_OK=1
+ else
+-	SHMAT_OK=0
+-	override CFLAGS+=-DUSEMMAP=1
+-	LDFLAGS += -Wno-deprecated-declarations
++	ifeq "$(shell echo '$(HASH)include <sys/ipc.h>@$(HASH)include <sys/shm.h>@int main() { int _id = shmget(IPC_PRIVATE, 65536, IPC_CREAT | IPC_EXCL | 0600); shmctl(_id, IPC_RMID, 0); return 0;}' | tr @ '\n' | $(CC) $(CFLAGS) -x c - -o .test2 2>/dev/null && echo 1 || echo 0 ; rm -f .test2 )" "1"
++		SHMAT_OK=1
++	else
++		SHMAT_OK=0
++		override CFLAGS+=-DUSEMMAP=1
++		LDFLAGS += -Wno-deprecated-declarations
++	endif
+ endif
+ 
+ ifdef TEST_MMAP
+@@ -322,6 +384,44 @@
+ 	LDFLAGS += -Wno-deprecated-declarations
+ endif
+ 
++$(info ==== Debug Information ====)
++$(info SYS = $(SYS))
++$(info ARCH = $(ARCH))
++$(info CC = $(CC))
++$(info CXX = $(CXX))
++$(info CFLAGS = $(CFLAGS))
++$(info CPPFLAGS = $(CPPFLAGS))
++$(info INCLUDES = $(INCLUDES))
++$(info AFL_MAIN_CFLAGS = $(AFL_MAIN_CFLAGS))
++$(info LDFLAGS = $(LDFLAGS))
++$(info LLVM_CONFIG = $(LLVM_CONFIG))
++$(info LLVM_MAJOR = $(LLVM_MAJOR))
++$(info LLVM_MINOR = $(LLVM_MINOR))
++$(info LLVM_APPLE_XCODE = $(LLVM_APPLE_XCODE))
++$(info LLVM_STDCXX = $(LLVM_STDCXX))
++$(info LLVM_LTO = $(LLVM_LTO))
++$(info LLVM_MIN_4_0_1 = $(LLVM_MIN_4_0_1))
++$(info LLVM_13_OK = $(LLVM_13_OK))
++$(info CLANG_CFL = $(CLANG_CFL))
++$(info CLANG_CPPFL = $(CLANG_CPPFL))
++$(info CLANG_LFL = $(CLANG_LFL))
++$(info CLANG_BIN = $(CLANG_BIN))
++$(info CFLAGS_SAFE = $(CFLAGS_SAFE))
++$(info CFLAGS_OPT = $(CFLAGS_OPT))
++$(info AFL_CLANG_FLTO = $(AFL_CLANG_FLTO))
++$(info TARGETS = $(TARGETS))
++$(info PROGS = $(PROGS))
++$(info BIN_PATH = $(BIN_PATH))
++$(info HELPER_PATH = $(HELPER_PATH))
++$(info DOC_PATH = $(DOC_PATH))
++$(info MISC_PATH = $(MISC_PATH))
++$(info SHMAT_OK = $(SHMAT_OK))
++$(info CLANGVER = $(CLANGVER))
++$(info LLVMVER = $(LLVMVER))
++$(info IS_IOS = $(IS_IOS))
++$(info BUILD_DATE = $(BUILD_DATE))
++$(info ====== End Debug =======)
++
+ .PHONY: all
+ all:	test_x86 test_shm test_python ready $(PROGS) llvm gcc_plugin test_build all_done
+ 	-$(MAKE) -C utils/aflpp_driver
+@@ -783,7 +883,9 @@
+ 
+ .PHONY: source-only
+ source-only: all
++ifneq "$(SYS)" "Android"
+ 	-$(MAKE) -j$(nproc) -f GNUmakefile.llvm
++endif
+ ifneq "$(SYS)" "Darwin"
+ 	-$(MAKE) -f GNUmakefile.gcc_plugin
+ 	-$(MAKE) -C utils/libdislocator
+diff -ruN orig/GNUmakefile.gcc_plugin modified/GNUmakefile.gcc_plugin
+--- orig/GNUmakefile.gcc_plugin	2025-06-28 22:29:37.000000000 +0200
++++ modified/GNUmakefile.gcc_plugin	2025-08-16 11:06:31.087292805 +0200
+@@ -20,7 +20,21 @@
+ #   https://www.apache.org/licenses/LICENSE-2.0
+ #
+ #TEST_MMAP=1
+-PREFIX      ?= /usr/local
++
++ifndef SYS
++  SYS = $(shell uname -s)
++endif
++
++ifndef ARCH
++  ARCH = $(shell uname -m)
++endif
++
++ifeq "$(SYS)" "Android"
++	PREFIX      ?= /opt/afl-android
++else
++	PREFIX      ?= /usr/local
++endif
++
+ HELPER_PATH ?= $(PREFIX)/lib/afl
+ BIN_PATH    ?= $(PREFIX)/bin
+ DOC_PATH    ?= $(PREFIX)/share/doc/afl
+@@ -43,7 +57,6 @@
+ CC          ?= gcc
+ CXX         ?= g++
+ 
+-SYS = $(shell uname -s)
+ 
+ ifeq "clang" "$(CC)"
+         CC  = gcc
+@@ -67,11 +80,16 @@
+ GCCVER    = $(shell $(CC) --version 2>/dev/null | awk 'NR == 1 {print $$NF}')
+ GCCBINDIR = $(shell dirname `command -v $(CC)` 2>/dev/null )
+ 
+-ifeq "$(shell echo '$(HASH)include <sys/ipc.h>@$(HASH)include <sys/shm.h>@int main() { int _id = shmget(IPC_PRIVATE, 65536, IPC_CREAT | IPC_EXCL | 0600); shmctl(_id, IPC_RMID, 0); return 0;}' | tr @ '\n' | $(CC) -x c - -o .test2 2>/dev/null && echo 1 || echo 0 ; rm -f .test2 )" "1"
++ifeq "$(SYS)" "Android"
++# we use custom overrides in android-ashmem.h
+ 	SHMAT_OK=1
+ else
+-	SHMAT_OK=0
+-	override CFLAGS_SAFE += -DUSEMMAP=1
++	ifeq "$(shell echo '$(HASH)include <sys/ipc.h>@$(HASH)include <sys/shm.h>@int main() { int _id = shmget(IPC_PRIVATE, 65536, IPC_CREAT | IPC_EXCL | 0600); shmctl(_id, IPC_RMID, 0); return 0;}' | tr @ '\n' | $(CC) -x c - -o .test2 2>/dev/null && echo 1 || echo 0 ; rm -f .test2 )" "1"
++		SHMAT_OK=1
++	else
++		SHMAT_OK=0
++		override CFLAGS_SAFE += -DUSEMMAP=1
++	endif
+ endif
+ 
+ ifeq "$(TEST_MMAP)" "1"
+@@ -79,6 +97,47 @@
+ 	override CFLAGS_SAFE += -DUSEMMAP=1
+ endif
+ 
++
++
++ifeq "$(SYS)" "Android"
++  # Expecting: make SYS=Android NDK_DIR=/path/to/android-ndk ARCH=aarch64 API_LEVEL=33
++
++  SHMAT_OK=1
++
++  # Map ARCH to TARGET_TRIPLE
++  ifeq "$(ARCH)" "aarch64"
++    TARGET_TRIPLE := aarch64-linux-android
++  else ifeq "$(ARCH)" "armv7"
++    TARGET_TRIPLE := armv7a-linux-androideabi
++  else ifeq "$(ARCH)" "x86_64"
++    TARGET_TRIPLE := x86_64-linux-android
++  else ifeq "$(ARCH)" "x86"
++    TARGET_TRIPLE := i686-linux-android
++  else
++    $(error Unsupported ARCH '$(ARCH)'; use aarch64, armv7, x86_64, or x86)
++  endif
++
++  HOST_ARCH := $(shell uname -m)
++
++  ifeq ($(HOST_ARCH),x86_64)
++    NDK_HOST_PLATFORM := linux-x86_64
++  else ifeq ($(HOST_ARCH),aarch64)
++    NDK_HOST_PLATFORM := linux-aarch64
++  else
++    $(error Unsupported host architecture '$(HOST_ARCH)'; use x86_64 or aarch64)
++  endif
++
++  TOOLCHAIN_DIR := $(NDK_DIR)/toolchains/llvm/prebuilt/$(NDK_HOST_PLATFORM)
++  NDK_SYSROOT   := $(TOOLCHAIN_DIR)/sysroot
++
++  override CC  := $(TOOLCHAIN_DIR)/bin/$(TARGET_TRIPLE)$(API_LEVEL)-clang
++  override CXX := $(TOOLCHAIN_DIR)/bin/$(TARGET_TRIPLE)$(API_LEVEL)-clang++
++
++  override CFLAGS  += --sysroot=$(NDK_SYSROOT) -D__ANDROID__ -fPIE -I$(NDK_SYSROOT)/usr/include
++  override LDFLAGS += --sysroot=$(NDK_SYSROOT) -pie
++
++endif
++
+ ifneq "$(SYS)" "Haiku"
+ ifneq "$(SYS)" "OpenBSD"
+   	LDFLAGS += -lrt
+diff -ruN orig/GNUmakefile.llvm modified/GNUmakefile.llvm
+--- orig/GNUmakefile.llvm	2025-06-28 22:29:37.000000000 +0200
++++ modified/GNUmakefile.llvm	2025-08-16 11:06:08.995326628 +0200
+@@ -19,7 +19,20 @@
+ #TEST_MMAP=1
+ HASH=\#
+ 
+-PREFIX      ?= /usr/local
++ifndef SYS
++  SYS = $(shell uname -s)
++endif
++
++ifndef ARCH
++  ARCH = $(shell uname -m)
++endif
++
++ifeq "$(SYS)" "Android"
++	PREFIX      ?= /opt/afl-android
++else
++	PREFIX      ?= /usr/local
++endif
++
+ HELPER_PATH ?= $(PREFIX)/lib/afl
+ BIN_PATH    ?= $(PREFIX)/bin
+ DOC_PATH    ?= $(PREFIX)/share/doc/afl
+@@ -30,11 +43,51 @@
+ 
+ VERSION     = $(shell grep '^ *$(HASH)define VERSION ' ./config.h | cut -d '"' -f2)
+ 
+-SYS = $(shell uname -s)
+-
+ override LLVM_TOO_NEW_DEFAULT := 21
+ override LLVM_TOO_OLD_DEFAULT := 14
+ 
++
++
++ifeq "$(SYS)" "Android"
++  # Expecting: make SYS=Android NDK_DIR=/path/to/android-ndk ARCH=aarch64 API_LEVEL=33
++
++  SHMAT_OK=1
++
++  # Map ARCH to TARGET_TRIPLE
++  ifeq "$(ARCH)" "aarch64"
++    TARGET_TRIPLE := aarch64-linux-android
++  else ifeq "$(ARCH)" "armv7"
++    TARGET_TRIPLE := armv7a-linux-androideabi
++  else ifeq "$(ARCH)" "x86_64"
++    TARGET_TRIPLE := x86_64-linux-android
++  else ifeq "$(ARCH)" "x86"
++    TARGET_TRIPLE := i686-linux-android
++  else
++    $(error Unsupported ARCH '$(ARCH)'; use aarch64, armv7, x86_64, or x86)
++  endif
++
++  HOST_ARCH := $(shell uname -m)
++
++  ifeq ($(HOST_ARCH),x86_64)
++    NDK_HOST_PLATFORM := linux-x86_64
++  else ifeq ($(HOST_ARCH),aarch64)
++    NDK_HOST_PLATFORM := linux-aarch64
++  else
++    $(error Unsupported host architecture '$(HOST_ARCH)'; use x86_64 or aarch64)
++  endif
++
++  TOOLCHAIN_DIR := $(NDK_DIR)/toolchains/llvm/prebuilt/$(NDK_HOST_PLATFORM)
++  NDK_SYSROOT   := $(TOOLCHAIN_DIR)/sysroot
++
++  override CC  := $(TOOLCHAIN_DIR)/bin/$(TARGET_TRIPLE)$(API_LEVEL)-clang
++  override CXX := $(TOOLCHAIN_DIR)/bin/$(TARGET_TRIPLE)$(API_LEVEL)-clang++
++
++  LLVM_CONFIG := $(TOOLCHAIN_DIR)/bin/llvm-config
++
++  override CFLAGS  += --sysroot=$(NDK_SYSROOT) -D__ANDROID__ -fPIE -I$(NDK_SYSROOT)/usr/include
++  override LDFLAGS += --sysroot=$(NDK_SYSROOT) -pie
++endif
++
+ ifeq "$(SYS)" "OpenBSD"
+   LLVM_CONFIG ?= $(BIN_PATH)/llvm-config
+   HAS_OPT = $(shell test -x $(BIN_PATH)/opt && echo 0 || echo 1)
+@@ -347,14 +400,20 @@
+   LDFLAGS += -lc++abi -lpthread
+ endif
+ 
+-ifeq "$(shell echo '$(HASH)include <sys/ipc.h>@$(HASH)include <sys/shm.h>@int main() { int _id = shmget(IPC_PRIVATE, 65536, IPC_CREAT | IPC_EXCL | 0600); shmctl(_id, IPC_RMID, 0); return 0;}' | tr @ '\n' | $(CC) -x c - -o .test2 2>/dev/null && echo 1 || echo 0 ; rm -f .test2 )" "1"
+-        SHMAT_OK=1
++ifeq "$(SYS)" "Android"
++# we use custom overrides in android-ashmem.h
++	SHMAT_OK=1
+ else
+-        SHMAT_OK=0
+-        CFLAGS_SAFE += -DUSEMMAP=1
+-        LDFLAGS += -Wno-deprecated-declarations
++	ifeq "$(shell echo '$(HASH)include <sys/ipc.h>@$(HASH)include <sys/shm.h>@int main() { int _id = shmget(IPC_PRIVATE, 65536, IPC_CREAT | IPC_EXCL | 0600); shmctl(_id, IPC_RMID, 0); return 0;}' | tr @ '\n' | $(CC) $(CFLAGS) -x c - -o .test2 2>/dev/null && echo 1 || echo 0 ; rm -f .test2 )" "1"
++		SHMAT_OK=1
++	else
++		SHMAT_OK=0
++		override CFLAGS+=-DUSEMMAP=1
++		LDFLAGS += -Wno-deprecated-declarations
++	endif
+ endif
+ 
++
+ ifeq "$(TEST_MMAP)" "1"
+         SHMAT_OK=0
+         CFLAGS_SAFE += -DUSEMMAP=1
+@@ -381,6 +440,55 @@
+ 
+ LLVM_MIN_4_0_1 = $(shell awk 'function tonum(ver, a) {split(ver,a,"."); return a[1]*1000000+a[2]*1000+a[3]} BEGIN { exit tonum(ARGV[1]) >= tonum(ARGV[2]) }' $(LLVMVER) 4.0.1; echo $$?)
+ 
++
++
++
++
++
++
++$(info ==== Debug Information ====)
++$(info SYS = $(SYS))
++$(info ARCH = $(ARCH))
++$(info CC = $(CC))
++$(info CXX = $(CXX))
++$(info CFLAGS = $(CFLAGS))
++$(info CPPFLAGS = $(CPPFLAGS))
++$(info INCLUDES = $(INCLUDES))
++$(info AFL_MAIN_CFLAGS = $(AFL_MAIN_CFLAGS))
++$(info LDFLAGS = $(LDFLAGS))
++$(info LLVM_CONFIG = $(LLVM_CONFIG))
++$(info LLVM_MAJOR = $(LLVM_MAJOR))
++$(info LLVM_MINOR = $(LLVM_MINOR))
++$(info LLVM_APPLE_XCODE = $(LLVM_APPLE_XCODE))
++$(info LLVM_STDCXX = $(LLVM_STDCXX))
++$(info LLVM_LTO = $(LLVM_LTO))
++$(info LLVM_MIN_4_0_1 = $(LLVM_MIN_4_0_1))
++$(info LLVM_13_OK = $(LLVM_13_OK))
++$(info CLANG_CFL = $(CLANG_CFL))
++$(info CLANG_CPPFL = $(CLANG_CPPFL))
++$(info CLANG_LFL = $(CLANG_LFL))
++$(info CLANG_BIN = $(CLANG_BIN))
++$(info CFLAGS_SAFE = $(CFLAGS_SAFE))
++$(info CFLAGS_OPT = $(CFLAGS_OPT))
++$(info AFL_CLANG_FLTO = $(AFL_CLANG_FLTO))
++$(info TARGETS = $(TARGETS))
++$(info PROGS = $(PROGS))
++$(info BIN_PATH = $(BIN_PATH))
++$(info HELPER_PATH = $(HELPER_PATH))
++$(info DOC_PATH = $(DOC_PATH))
++$(info MISC_PATH = $(MISC_PATH))
++$(info SHMAT_OK = $(SHMAT_OK))
++$(info CLANGVER = $(CLANGVER))
++$(info LLVMVER = $(LLVMVER))
++$(info IS_IOS = $(IS_IOS))
++$(info BUILD_DATE = $(BUILD_DATE))
++$(info ====== End Debug =======)
++
++
++
++
++
++
+ .PHONY: all
+ all: $(TARGETS)
+ 
+diff -ruN orig/include/afl-fuzz.h modified/include/afl-fuzz.h
+--- orig/include/afl-fuzz.h	2025-06-28 22:29:37.000000000 +0200
++++ modified/include/afl-fuzz.h	2025-08-15 15:45:57.501089823 +0200
+@@ -113,6 +113,12 @@
+   #endif
+ #endif                                                         /* __linux__ */
+ 
++#ifdef __ANDROID__
++  #include <pthread.h>
++  #include <android-ashmem.h>
++  #define HAVE_AFFINITY 1
++#endif
++
+ #ifdef __APPLE__
+   #include <TargetConditionals.h>
+ #endif
+diff -ruN orig/include/android-ashmem.h modified/include/android-ashmem.h
+--- orig/include/android-ashmem.h	2025-06-28 22:29:37.000000000 +0200
++++ modified/include/android-ashmem.h	2025-08-20 10:21:26.537557536 +0200
+@@ -1,87 +1,163 @@
+ #ifdef __ANDROID__
+   #ifndef _ANDROID_ASHMEM_H
+     #define _ANDROID_ASHMEM_H
+-
+     #ifndef _GNU_SOURCE
+       #define _GNU_SOURCE
+     #endif
+-    #include <sys/syscall.h>
+-    #include <unistd.h>
+-    #include <fcntl.h>
+-    #include <linux/ashmem.h>
+-    #include <sys/ioctl.h>
+-    #include <sys/mman.h>
+-    #include <sys/shm.h>
+-    #include <stdio.h>
+-    #define ASHMEM_DEVICE "/dev/ashmem"
+-
+-int shmdt(const void *address) {
+-
+-    #if defined(SYS_shmdt)
+-  return syscall(SYS_shmdt, address);
+-    #else
+-  return syscall(SYS_ipc, SHMDT, 0, 0, 0, address, 0);
+-    #endif
+-
++#include <sys/syscall.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <linux/ashmem.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <sys/shm.h>
++#include <stdio.h>
++#include <string.h>
++#include <errno.h>
++#include <stdlib.h>
++#define ASHMEM_DEVICE "/dev/ashmem"
++#define DEFAULT_MAP_SIZE 65536
++#define MAX_MAPPINGS 128  // Maximum tracked mappings
++//#define ENABLE_ASHMEM_DEBUG
++#ifdef ENABLE_ASHMEM_DEBUG
++  #define DBG_PRINT(fmt, ...) \
++      fprintf(stderr, "ASHMEM: " fmt, ##__VA_ARGS__)
++#else
++  #define DBG_PRINT(fmt, ...) \
++      do { } while (0)
++#endif
++/* ===== Mapping registry ===== */
++typedef struct {
++    void   *addr;
++    size_t  size;
++} mapping_entry;
++static mapping_entry mapping_table[MAX_MAPPINGS];
++static void register_mapping(void *addr, size_t size) {
++    for (int i = 0; i < MAX_MAPPINGS; i++) {
++        if (mapping_table[i].addr == NULL) {
++            mapping_table[i].addr = addr;
++            mapping_table[i].size = size;
++            break;
++        }
++    }
++}
++static size_t unregister_mapping(const void *addr) {
++    size_t size = 0;
++    for (int i = 0; i < MAX_MAPPINGS; i++) {
++        if (mapping_table[i].addr == addr) {
++            size = mapping_table[i].size;
++            mapping_table[i].addr = NULL;
++            mapping_table[i].size = 0;
++            break;
++        }
++    }
++    return size;
++}
++static void cleanup_all_mappings(void) {
++    for (int i = 0; i < MAX_MAPPINGS; i++) {
++        if (mapping_table[i].addr != NULL) {
++            DBG_PRINT("Cleanup: unmapping address=%p, size=%zu\n",
++                      mapping_table[i].addr, mapping_table[i].size);
++            munmap(mapping_table[i].addr, mapping_table[i].size);
++            mapping_table[i].addr = NULL;
++            mapping_table[i].size = 0;
++        }
++    }
++}
++/* ============================= */
++static void __attribute__((constructor)) init_ashmem(void) {
++    DBG_PRINT("Android ASHMEM implementation initialized\n");
++    atexit(cleanup_all_mappings); // auto cleanup on exit
++}
++__attribute__((used, visibility("default")))
++static void *ashmem_shmat(int __shmid, const void *__shmaddr, int __shmflg) {
++    (void)__shmflg;
++    DBG_PRINT("shmat called with shmid=%d, addr=%p, flags=0x%x\n",
++              __shmid, __shmaddr, __shmflg);
++    size_t map_size;
++    // Anonymous/shared mapping request
++    if (__shmid == 0) {
++        map_size = DEFAULT_MAP_SIZE;
++        DBG_PRINT("Anonymous mapping request, size=%zu\n", map_size);
++        void *ptr = mmap(NULL, map_size, PROT_READ | PROT_WRITE,
++                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++        if (ptr != MAP_FAILED) {
++            register_mapping(ptr, map_size);
++        }
++        return ptr;
++    }
++    // Get actual ashmem region size
++    int size = ioctl(__shmid, ASHMEM_GET_SIZE, NULL);
++    if (size < 0) {
++        DBG_PRINT("Invalid ashmem region: %s\n", strerror(errno));
++        return (void *)-1;
++    }
++    map_size = (size_t)size;
++    // Map ashmem region
++    void *ptr = mmap((void *)__shmaddr, map_size,
++                     PROT_READ | PROT_WRITE,
++                     MAP_SHARED,
++                     __shmid, 0);
++    if (ptr == MAP_FAILED) {
++        DBG_PRINT("Mapping failed: %s\n", strerror(errno));
++        return (void *)-1;
++    }
++    register_mapping(ptr, map_size);
++    DBG_PRINT("Mapping succeeded at %p, size=%zu\n", ptr, map_size);
++    return ptr;
++}
++__attribute__((used, visibility("default")))
++static int ashmem_shmdt(const void *address) {
++    DBG_PRINT("shmdt called with address=%p\n", address);
++    size_t size = unregister_mapping(address);
++    if (size == 0) {
++        DBG_PRINT("Address %p not found in mapping table\n", address);
++        errno = EINVAL;
++        return -1;
++    }
++    DBG_PRINT("Unmapping address=%p, size=%zu\n", address, size);
++    return munmap((void *)address, size);
++}
++__attribute__((used, visibility("default")))
++static int ashmem_shmctl(int __shmid, int __cmd, struct shmid_ds *__buf) {
++    (void)__buf;
++    DBG_PRINT("shmctl called with shmid=%d, cmd=%d\n", __shmid, __cmd);
++    if (__cmd == IPC_RMID) {
++        int length = ioctl(__shmid, ASHMEM_GET_SIZE, NULL);
++        unsigned int safe_length = (length >= 0) ? (unsigned int)length : 0;
++        struct ashmem_pin pin = {0, safe_length};
++        ioctl(__shmid, ASHMEM_UNPIN, &pin);
++        close(__shmid);
++        DBG_PRINT("IPC_RMID: region unpinned and closed, size=%u\n",
++                  safe_length);
++    }
++    return 0;
+ }
+-
+-int shmctl(int __shmid, int __cmd, struct shmid_ds *__buf) {
+-
+-  int ret = 0;
+-  if (__cmd == IPC_RMID) {
+-
+-    int               length = ioctl(__shmid, ASHMEM_GET_SIZE, NULL);
+-    unsigned int      safe_length = length >= 0 ? length : 0;
+-    struct ashmem_pin pin = {0, safe_length};
+-    ret = ioctl(__shmid, ASHMEM_UNPIN, &pin);
+-    close(__shmid);
+-
+-  }
+-
+-  return ret;
+-
+-}
+-
+-int shmget(key_t __key, size_t __size, int __shmflg) {
+-
+-  (void)__shmflg;
+-  int  fd, ret;
+-  char ourkey[11];
+-
+-  fd = open(ASHMEM_DEVICE, O_RDWR);
+-  if (fd < 0) return fd;
+-
+-  sprintf(ourkey, "%d", __key);
+-  ret = ioctl(fd, ASHMEM_SET_NAME, ourkey);
+-  if (ret < 0) goto error;
+-
+-  ret = ioctl(fd, ASHMEM_SET_SIZE, __size);
+-  if (ret < 0) goto error;
+-
+-  return fd;
+-
+-error:
+-  close(fd);
+-  return ret;
+-
+-}
+-
+-void *shmat(int __shmid, const void *__shmaddr, int __shmflg) {
+-
+-  (void)__shmflg;
+-  int   size;
+-  void *ptr;
+-
+-  size = ioctl(__shmid, ASHMEM_GET_SIZE, NULL);
+-  if (size < 0) { return NULL; }
+-
+-  ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, __shmid, 0);
+-  if (ptr == MAP_FAILED) { return NULL; }
+-
+-  return ptr;
+-
++__attribute__((used, visibility("default")))
++static int ashmem_shmget(key_t __key, size_t __size, int __shmflg) {
++    (void)__shmflg;
++    DBG_PRINT("shmget called with key=%d, size=%zu, flags=0x%x\n",
++              __key, __size, __shmflg);
++    int fd = open(ASHMEM_DEVICE, O_RDWR);
++    if (fd < 0) {
++        DBG_PRINT("Failed to open %s: %s\n", ASHMEM_DEVICE, strerror(errno));
++        return -1;
++    }
++    char name[32];
++    snprintf(name, sizeof(name), "afl_%d", __key);
++    ioctl(fd, ASHMEM_SET_NAME, name);
++    size_t alloc_size = (__size > 0) ? __size : DEFAULT_MAP_SIZE;
++    if (ioctl(fd, ASHMEM_SET_SIZE, alloc_size) < 0) {
++        DBG_PRINT("Failed to set size: %s\n", strerror(errno));
++        close(fd);
++        return -1;
++    }
++    DBG_PRINT("Created ashmem region fd=%d, size=%zu\n", fd, alloc_size);
++    return fd;
+ }
+-
++#define shmget  ashmem_shmget
++#define shmat   ashmem_shmat
++#define shmdt   ashmem_shmdt
++#define shmctl  ashmem_shmctl
+   #endif                                              /* !_ANDROID_ASHMEM_H */
+ #endif                                                      /* !__ANDROID__ */
+-
+diff -ruN orig/include/forkserver.h modified/include/forkserver.h
+--- orig/include/forkserver.h	2025-06-28 22:29:37.000000000 +0200
++++ modified/include/forkserver.h	2025-08-15 15:21:26.474714389 +0200
+@@ -33,6 +33,12 @@
+ 
+ #include "types.h"
+ 
++#ifdef __ANDROID__
++  #include <pthread.h>
++  #include <android-ashmem.h>
++  #define HAVE_AFFINITY 1
++#endif
++
+ #ifdef __linux__
+ /**
+  * Nyx related typedefs taken from libnyx.h
+diff -ruN orig/instrumentation/afl-compiler-rt.o.c modified/instrumentation/afl-compiler-rt.o.c
+--- orig/instrumentation/afl-compiler-rt.o.c	2025-06-28 22:29:37.000000000 +0200
++++ modified/instrumentation/afl-compiler-rt.o.c	2025-08-15 15:50:42.850775878 +0200
+@@ -330,6 +330,7 @@
+ 
+ #else
+     u32 shm_id = atoi(id_str);
++    if (__afl_debug) fprintf(stderr, "DEBUG: Attempting to attach to shared memory id=%d\n", shm_id);
+     map = (u8 *)shmat(shm_id, NULL, 0);
+ 
+ #endif
+@@ -557,6 +558,7 @@
+     __afl_area_ptr = shm_base;
+ #else
+     u32 shm_id = atoi(id_str);
++    if (__afl_debug) fprintf(stderr, "DEBUG: Attempting to attach to shared memory id=%d\n", shm_id);
+ 
+     if (__afl_map_size && __afl_map_size > MAP_SIZE) {
+ 
+@@ -726,6 +728,7 @@
+     __afl_cmp_map = shm_base;
+ #else
+     u32 shm_id = atoi(id_str);
++    if (__afl_debug) fprintf(stderr, "DEBUG: Attempting to attach to shared memory id=%d\n", shm_id);
+ 
+     __afl_cmp_map = (struct cmp_map *)shmat(shm_id, NULL, 0);
+ #endif
+diff -ruN orig/src/afl-cc.c modified/src/afl-cc.c
+--- orig/src/afl-cc.c	2025-06-28 22:29:37.000000000 +0200
++++ modified/src/afl-cc.c	2025-08-15 15:17:04.377004152 +0200
+@@ -1949,142 +1949,107 @@
+   these have_*, otherwise they may not work as expected.
+ */
+ void add_sanitizers(aflcc_state_t *aflcc, char **envp) {
++  /* Mutual exclusion checks first */
++  if (getenv("AFL_USE_ASAN") && getenv("AFL_USE_MSAN"))
++    FATAL("ASAN and MSAN are mutually exclusive");
+ 
+-  if (getenv("AFL_USE_ASAN") || aflcc->have_asan) {
++  if (getenv("AFL_USE_ASAN") && getenv("AFL_HARDEN"))
++    FATAL("ASAN and AFL_HARDEN are mutually exclusive");
+ 
+-    if (getenv("AFL_USE_MSAN") || aflcc->have_msan)
+-      FATAL("ASAN and MSAN are mutually exclusive");
+-
+-    if (getenv("AFL_HARDEN"))
+-      FATAL("ASAN and AFL_HARDEN are mutually exclusive");
++  if (getenv("AFL_HARDEN") && getenv("AFL_USE_MSAN"))
++    FATAL("AFL_HARDEN and MSAN are mutually exclusive");
+ 
++  /* AddressSanitizer */
++  if (getenv("AFL_USE_ASAN") && !aflcc->have_asan) {
+     if (aflcc->compiler_mode == GCC_PLUGIN && !aflcc->have_staticasan) {
+-
+       insert_param(aflcc, "-static-libasan");
+-
+     }
+ 
+     add_defs_fortify(aflcc, 0);
+-    if (!aflcc->have_asan) {
+-
+-      insert_param(aflcc, "-fsanitize=address");
+-      insert_param(aflcc, "-fno-common");
+-
+-    }
+-
++    insert_param(aflcc, "-fsanitize=address");
++    insert_param(aflcc, "-fno-common");
+     aflcc->have_asan = 1;
++  }
+ 
+-  } else if (getenv("AFL_USE_MSAN") || aflcc->have_msan) {
+-
+-    if (getenv("AFL_USE_ASAN") || aflcc->have_asan)
+-      FATAL("ASAN and MSAN are mutually exclusive");
+-
+-    if (getenv("AFL_HARDEN"))
+-      FATAL("MSAN and AFL_HARDEN are mutually exclusive");
++  /* MemorySanitizer */
++  if (getenv("AFL_USE_MSAN") && !aflcc->have_msan) {
++    if (getenv("AFL_USE_ASAN")) FATAL("ASAN and MSAN are mutually exclusive");
++    if (getenv("AFL_HARDEN")) FATAL("MSAN and AFL_HARDEN are mutually exclusive");
+ 
+     add_defs_fortify(aflcc, 0);
+-    if (!aflcc->have_msan) { insert_param(aflcc, "-fsanitize=memory"); }
++    insert_param(aflcc, "-fsanitize=memory");
+     aflcc->have_msan = 1;
+-
+   }
+ 
+-  if (getenv("AFL_USE_UBSAN") || aflcc->have_ubsan) {
+-
+-    if (!aflcc->have_ubsan) { insert_param(aflcc, "-fsanitize=undefined"); }
+-
+-    if (getenv("AFL_UBSAN_VERBOSE")) {
++  /* UndefinedBehaviorSanitizer */
++  if (getenv("AFL_USE_UBSAN") && !aflcc->have_ubsan) {
++    insert_param(aflcc, "-fsanitize=undefined");
+ 
++    if (getenv("AFL_UBSAN_VERBOSE"))
+       insert_param(aflcc, "-fno-sanitize-recover=undefined");
+-
+-    } else {
+-
++    else
+       insert_param(aflcc, "-fsanitize-trap=undefined");
+ 
+-    }
+-
+     if (!aflcc->have_fp) {
+-
+       insert_param(aflcc, "-fno-omit-frame-pointer");
+       aflcc->have_fp = 1;
+-
+     }
+ 
+     aflcc->have_ubsan = 1;
+-
+   }
+ 
+-  if (getenv("AFL_USE_TSAN") || aflcc->have_tsan) {
+-
++  /* ThreadSanitizer */
++  if (getenv("AFL_USE_TSAN") && !aflcc->have_tsan) {
+     if (!aflcc->have_fp) {
+-
+       insert_param(aflcc, "-fno-omit-frame-pointer");
+       aflcc->have_fp = 1;
+-
+     }
+-
+-    if (!aflcc->have_tsan) { insert_param(aflcc, "-fsanitize=thread"); }
++    insert_param(aflcc, "-fsanitize=thread");
+     aflcc->have_tsan = 1;
+-
+   }
+ 
++  /* LeakSanitizer */
+   if (getenv("AFL_USE_LSAN") && !aflcc->have_lsan) {
+-
+     insert_param(aflcc, "-fsanitize=leak");
+     add_defs_lsan_ctrl(aflcc);
+     aflcc->have_lsan = 1;
+-
+   }
+ 
++  /* RealTimeSanitizer */
+   if (getenv("AFL_USE_RTSAN") && !aflcc->have_rtsan) {
+-
+     insert_param(aflcc, "-fsanitize=realtime");
+     aflcc->have_rtsan = 1;
+-
+   }
+ 
+-  if (getenv("AFL_USE_CFISAN") || aflcc->have_cfisan) {
+-
++  /* CFI Sanitizer */
++  if (getenv("AFL_USE_CFISAN") && !aflcc->have_cfisan) {
+     if (aflcc->compiler_mode == GCC_PLUGIN || aflcc->compiler_mode == GCC) {
+-
+-      if (!aflcc->have_fcf) { insert_param(aflcc, "-fcf-protection=full"); }
+-
++      if (!aflcc->have_fcf) {
++        insert_param(aflcc, "-fcf-protection=full");
++        aflcc->have_fcf = 1;
++      }
+     } else {
+-
+       if (!aflcc->lto_mode && !aflcc->have_flto) {
+-
+         uint32_t i = 0, found = 0;
+         while (envp[i] != NULL && !found) {
+-
+           if (strncmp("-flto", envp[i++], 5) == 0) found = 1;
+-
+         }
+-
+-        if (!found) { insert_param(aflcc, "-flto"); }
++        if (!found) insert_param(aflcc, "-flto");
+         aflcc->have_flto = 1;
+-
+       }
+ 
+-      if (!aflcc->have_cfisan) { insert_param(aflcc, "-fsanitize=cfi"); }
+-
+-      if (getenv("AFL_CFISAN_VERBOSE")) {
++      insert_param(aflcc, "-fsanitize=cfi");
+ 
++      if (getenv("AFL_CFISAN_VERBOSE"))
+         insert_param(aflcc, "-fno-sanitize-trap=cfi");
+ 
+-      }
+-
+       if (!aflcc->have_hidden) {
+-
+         insert_param(aflcc, "-fvisibility=hidden");
+         aflcc->have_hidden = 1;
+-
+       }
+-
+-      aflcc->have_cfisan = 1;
+-
+     }
+-
++    aflcc->have_cfisan = 1;
+   }
+-
+ }
+ 
+ /* Add params to enable LLVM SanCov, the native PCGUARD */

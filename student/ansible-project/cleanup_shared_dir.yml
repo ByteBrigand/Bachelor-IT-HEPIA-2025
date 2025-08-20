@@ -1,0 +1,20 @@
+---
+- name: Clear shared directory
+  hosts: all
+  become: true
+  tasks:
+    - name: Kill adb-sync.sh process
+      shell: pkill -f adb-sync.sh || true
+      ignore_errors: yes
+  
+    - name: Remove all files on host
+      shell: rm -rf /var/log/adb-sync.log /tmp/adb_sync/* /shared/shared_files/* /shared/staging/*
+      ignore_errors: yes
+
+    - name: Remove all files on device
+      shell: adb shell rm -rf /sdcard/staging/* /sdcard/shared_files/*
+      ignore_errors: yes
+
+    - name: Restart adb-sync.sh
+      shell: nohup /usr/local/bin/adb-sync.sh > /dev/null 2>&1 &
+      ignore_errors: yes

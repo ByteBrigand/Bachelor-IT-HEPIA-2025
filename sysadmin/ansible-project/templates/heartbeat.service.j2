@@ -1,0 +1,10 @@
+[Unit]
+Description=Node Heartbeat Service
+After=network.target glusterfs.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/heartbeat.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,89 @@
+#!/bin/bash
+
+# Configuration
+THRESHOLD={{ disk_space_threshold }}
+INODE_THRESHOLD={{ inode_threshold }}
+EMAIL="{{ monitoring_email }}"
+HOSTNAME=$(hostname)
+
+# Function to print colored percentage
+print_colored_percent() {
+    local percent=$1
+    local threshold=$2
+    
+    if [ "$percent" -gt "$threshold" ]; then
+        echo -e "\033[31m$percent%\033[0m" # Red
+    elif [ "$percent" -gt $(($threshold - 20)) ]; then
+        echo -e "\033[33m$percent%\033[0m" # Yellow
+    else
+        echo -e "\033[32m$percent%\033[0m" # Green
+    fi
+}
+
+# Function to check disk space and inodes
+check_disk_usage() {
+    local warnings=""
+    local current_time=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    # Show current usage if running interactively
+    if [ -t 0 ]; then
+        echo "Current disk space usage on $HOSTNAME:"
+        printf "%-20s %-10s %-10s %-10s %s\n" "Mountpoint" "Size" "Used" "Avail" "Use%"
+        echo "--------------------------------------------------------------------------------"
+        df -h | tail -n +2 | while read filesystem blocks used available use_percent mountpoint; do
+            if [[ $use_percent =~ ^[0-9]+%$ ]]; then
+                percent=${use_percent/\%/}
+                colored_percent=$(print_colored_percent "$percent" "$THRESHOLD")
+                printf "%-20s %-10s %-10s %-10s %s\n" "$mountpoint" "$blocks" "$used" "$available" "$colored_percent"
+            fi
+        done
+        
+        echo -e "\nCurrent inode usage:"
+        printf "%-20s %-10s %-10s %-10s %s\n" "Mountpoint" "INodes" "IUsed" "IFree" "Use%"
+        echo "--------------------------------------------------------------------------------"
+        df -i | tail -n +2 | while read filesystem inodes iused ifree use_percent mountpoint; do
+            if [[ $use_percent =~ ^[0-9]+%$ ]]; then
+                percent=${use_percent/\%/}
+                colored_percent=$(print_colored_percent "$percent" "$INODE_THRESHOLD")
+                printf "%-20s %-10s %-10s %-10s %s\n" "$mountpoint" "$inodes" "$iused" "$ifree" "$colored_percent"
+            fi
+        done
+        echo
+    fi
+
+    # Check disk space
+    df -h | tail -n +2 | while read filesystem blocks used available use_percent mountpoint; do
+        if [[ $use_percent =~ ^[0-9]+%$ ]]; then
+            use_percent=${use_percent/\%/}
+            if [ "$use_percent" -gt "$THRESHOLD" ]; then
+                warnings+="WARNING: Disk space on $mountpoint is at ${use_percent}% (${available} available)\n"
+                logger -t disk_check "Disk space warning: $mountpoint at ${use_percent}%"
+            fi
+        fi
+    done
+
+    # Check inodes
+    df -i | tail -n +2 | while read filesystem inodes iused ifree use_percent mountpoint; do
+        if [[ $use_percent =~ ^[0-9]+%$ ]]; then
+            use_percent=${use_percent/\%/}
+            if [ "$use_percent" -gt "$INODE_THRESHOLD" ]; then
+                warnings+="WARNING: Inode usage on $mountpoint is at ${use_percent}% (${ifree} inodes available)\n"
+                logger -t disk_check "Inode usage warning: $mountpoint at ${use_percent}%"
+            fi
+        fi
+    done
+
+    # Send email if there are warnings
+    if [ -n "$warnings" ]; then
+        echo -e "Disk space check report from $HOSTNAME at $current_time\n\n$warnings" | \
+            mail -s "[$HOSTNAME] Disk Space Warning" "$EMAIL"
+        logger -t disk_check "Warnings found and email sent"
+    else
+        logger -t disk_check "All disk space and inode usage checks passed"
+    fi
+}
+
+# Main execution
+check_disk_usage
+
+exit 0

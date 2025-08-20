@@ -1,0 +1,56 @@
+---
+- name: Configure Android Fuzzing Cluster
+  hosts: rpi_nodes
+  become: yes
+  vars_files:
+    - vars/main.yml
+#    - vault.yml # will use it later, in production
+
+
+
+
+  tasks:
+    - name: Configure Hosts, Users, Packages, Services
+      include_tasks: tasks/system.yml
+      tags: ['all_tasks', 'system']
+
+    - name: Configure WireGuard Mesh
+      include_tasks: tasks/wireguard.yml
+      tags: ['all_tasks', 'wireguard']
+
+    # This task will run with --tags "gluster_nuke"
+    - name: Nuke existing GlusterFS installation
+      include_tasks: tasks/gluster_nuke.yml
+      tags: gluster_nuke
+
+    - name: Configure GlusterFS
+      include_tasks: tasks/glusterfs.yml
+      tags: ['all_tasks', 'glusterfs']
+
+    - name: Configure Monitoring, Heartbeat and Alerting # the heartbeat is used by AFL++ to determine master and is dependent on glusterfs
+      include_tasks: tasks/monitoring.yml
+      tags: ['all_tasks', 'monitoring']
+
+    - name: Configure Podman, Build Images and Start User Containers
+      include_tasks: tasks/podman.yml
+      tags: ['all_tasks', 'podman']
+
+
+
+
+  handlers:
+    - name: Restart WireGuard service
+      service:
+        name: "wg-quick@{{ wg_if }}"
+        state: restarted
+
+    - name: Restart sysstat
+      service:
+        name: sysstat
+        state: restarted
+      listen: "Restart sysstat"
+
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes

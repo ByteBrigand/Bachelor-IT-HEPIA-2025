@@ -1,0 +1,50 @@
+---
+
+primary_gateway: "10.222.1.21"
+
+# WireGuard configuration
+wg_if: wg0
+wg_subnet: "10.10.4.0/24"
+wireguard_port: 51820
+wireguard_if_client: wg1
+wireguard_address_user: "10.10.5.254/24"
+
+# Monitoring settings
+monitoring_email: "ilovespam@mailto.plus"
+disk_space_threshold: 85
+inode_threshold: 85
+peer_down_threshold: 180
+
+# Common settings
+ansible_user: root
+ansible_become: yes
+
+# Default user configuration
+users:
+  - name: "user1"
+    number: 1
+    groups: ["kvm"]
+  - name: "user2"
+    number: 2
+    groups: ["kvm"]
+
+
+# GlusterFS configuration
+gluster_volume_name: "shared"
+gluster_replica_count: "2"
+gluster_brick_path: "/srv/{{ gluster_volume_name }}"
+gluster_mount_path: "/mnt/{{ gluster_volume_name }}"
+gluster_volume_options:
+  network.ping-timeout: "10"
+  auth.allow: "{{ wg_subnet }}"
+  quorum-type: "auto"
+  cluster.data-self-heal-algorithm: "full"
+  cluster.quorum-type: "auto"
+  cluster.favorite-child-policy: "majority"
+  performance.write-behind: "off"
+  performance.strict-write-ordering: "on"
+  cluster.heal-timeout: "60"
+  network.remote-dio: "enable"
+  cluster.server-quorum-type: "server"
+  storage.health-check-interval: "15"
+  cluster.heal-wait-queue-length: "128"
